@@ -18,7 +18,7 @@ async function waitForDownload(url, originalError) {
 
 const engine = new Engine({
   getSettings: () => bg('getSettings'),
-  pageCall: (tabId, pageOp, args) => bg('pageCall', { tabId, pageOp, args }),
+  pageCall: (tabId, pageOp, args, opts) => bg('pageCall', { tabId, pageOp, args, opts }),
   pickTab: (preferred = null) => bg('pickTab', { preferred }),
   navigate: (tabId, url) => bg('navigate', { tabId, url }),
   cacheGet: (key) => bg('cacheGet', { key }),

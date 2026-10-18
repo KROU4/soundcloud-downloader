@@ -176,6 +176,11 @@
     paint();
   }
 
+  /** Writing the same text still counts as a DOM mutation and would wake our observer. */
+  function setLabel(label, text) {
+    if (label && label.textContent !== text) label.textContent = text;
+  }
+
   /** Reflects engine state on every visible button. */
   function paint() {
     for (const btn of document.querySelectorAll(`.${BTN}`)) {
@@ -191,7 +196,7 @@
         if (btn.dataset.state !== 'busy' && btn.dataset.state !== 'error') {
           delete btn.dataset.state;
           btn.title = 'Скачать';
-          if (label) label.textContent = 'Скачать';
+          setLabel(label, 'Скачать');
         }
         continue;
       }
@@ -201,22 +206,22 @@
         btn.style.setProperty('--scdl-p', `${pct}%`);
         const counts = job.counts.total > 1 ? ` (${job.counts.done}/${job.counts.total})` : '';
         btn.title = `Загрузка ${pct}%${counts}`;
-        if (label) label.textContent = `${pct}%${counts}`;
+        setLabel(label, `${pct}%${counts}`);
       } else if (job.status === 'done') {
         btn.dataset.state = 'done';
         btn.title = 'Скачано. Нажмите, чтобы скачать ещё раз';
-        if (label) label.textContent = 'Скачано';
+        setLabel(label, 'Скачано');
       } else if (job.status === 'partial') {
         btn.dataset.state = 'error';
         btn.title = `Скачано ${job.counts.done} из ${job.counts.total}. Подробности в окне расширения`;
-        if (label) label.textContent = `${job.counts.done}/${job.counts.total}`;
+        setLabel(label, `${job.counts.done}/${job.counts.total}`);
       } else if (job.status === 'error') {
         btn.dataset.state = 'error';
         btn.title = job.error || 'Ошибка';
-        if (label) label.textContent = 'Ошибка';
+        setLabel(label, 'Ошибка');
       } else {
         delete btn.dataset.state;
-        if (label) label.textContent = 'Скачать';
+        setLabel(label, 'Скачать');
       }
     }
   }

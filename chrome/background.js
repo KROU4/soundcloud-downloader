@@ -12,8 +12,10 @@ const IS_SERVICE_WORKER = typeof ServiceWorkerGlobalScope !== 'undefined' && glo
 // SoundCloud tabs: the engine takes track data and stream links from the site's own
 // player in one of them (see content/page-hook.js) instead of calling the API.
 
-const SC_PAGE = /^https:\/\/(m\.|www\.)?soundcloud\.com\//;
-const NOT_READY = /Receiving end does not exist|Could not establish connection|message port closed|не ответил/i;
+// Hosts our content scripts run on (manifest content_scripts.matches).
+const SC_PAGE = /^https:\/\/(m\.)?soundcloud\.com\//;
+// No content script in the tab: opened before the extension was installed or reloaded.
+const NO_SCRIPT = /Receiving end does not exist|Could not establish connection/i;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function tabMessage(tabId, op, args) {
@@ -43,11 +45,12 @@ async function waitReady(tabId, timeout = 30000) {
   throw new Error(`Страница SoundCloud не загрузилась${lastError ? `: ${lastError.message}` : ''}`);
 }
 
-async function pageCall(tabId, op, args) {
+/** `reload: false` for look-only callers (the popup): never disturb the user's page for them. */
+async function pageCall(tabId, op, args, { reload = true } = {}) {
   try {
     return await tabMessage(tabId, op, args);
   } catch (e) {
-    if (!NOT_READY.test(e.message)) throw e;
+    if (!NO_SCRIPT.test(e.message) || !reload) throw e;
     // The page was opened before the extension was (re)loaded, or is still loading:
     // reload it so our scripts are in place before the site's player starts.
     const tab = await ext.tabs.get(tabId);
@@ -76,6 +79,8 @@ async function navigateTab(tabId, url) {
   await waitReady(tabId);
 }
 
+let creatingTab = null;
+
 /** The tab a job works in: the given one if it still shows SoundCloud, else any SoundCloud tab, else a new one. */
 async function pickTab(preferred) {
   if (preferred != null) {
@@ -84,11 +89,18 @@ async function pickTab(preferred) {
   }
   const tabs = await ext.tabs.query({ url: SC_TAB_PATTERNS });
   const usable = tabs.filter((t) => SC_PAGE.test(t.url || ''));
+  // A visible tab: hidden ones throttle timers and do not lazy-load lists.
   const best = usable.find((t) => t.active) || usable[0];
   if (best) return best.id;
-  const created = await ext.tabs.create({ url: 'https://soundcloud.com/', active: true });
-  await waitReady(created.id);
-  return created.id;
+  // Jobs started together share one new tab.
+  creatingTab ??= (async () => {
+    const created = await ext.tabs.create({ url: 'https://soundcloud.com/', active: true });
+    await waitReady(created.id);
+    return created.id;
+  })().finally(() => {
+    creatingTab = null;
+  });
+  return creatingTab;
 }
 
 async function getSettings() {
@@ -247,7 +259,7 @@ onMessage(
       case 'findDownload':
         return findDownload(msg.url);
       case 'pageCall':
-        return pageCall(msg.tabId, msg.pageOp, msg.args);
+        return pageCall(msg.tabId, msg.pageOp, msg.args, msg.opts);
       case 'pickTab':
         return pickTab(msg.preferred);
       case 'navigate':

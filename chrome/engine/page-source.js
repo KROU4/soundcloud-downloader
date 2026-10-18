@@ -72,18 +72,36 @@ export function qualityLabel(grab) {
   return kbps ? `${codec} ${kbps} kbps` : codec;
 }
 
+const LOGIN = 'SoundCloud просит войти: без входа плеер не воспроизводит треки. Войдите на soundcloud.com и повторите';
+const TAB_GONE = /No tab with id|Invalid tab|tab was closed|Вкладка SoundCloud закрыта/i;
+// Where the site's player streams from: a link elsewhere did not come from the player.
+const STREAM_HOST = /(^|\.)(sndcdn\.com|soundcloud\.cloud)$/;
+
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 export class PageSource {
   /**
-   * @param {{ pageCall: (tabId:number, op:string, args?:object) => Promise<any>,
+   * @param {{ pageCall: (tabId:number, op:string, args?:object, opts?:{reload?:boolean}) => Promise<any>,
    *           pickTab: (preferred?:number|null) => Promise<number>,
    *           navigate: (tabId:number, url:string) => Promise<void> }} platform
    */
   constructor(platform) {
     this.platform = platform;
+    /** tabId → tail of the queue of page operations (one at a time per tab). */
     this.locks = new Map();
+    /** tabId → { jobId, done, release }: a playlist/profile job keeps its page in the tab. */
+    this.leases = new Map();
   }
 
-  /** One job at a time drives a tab's player (and possibly navigates it). */
+  /** One operation at a time drives a tab's player (and possibly navigates it). */
   withTab(tabId, fn) {
     const prev = this.locks.get(tabId) || Promise.resolve();
     const run = prev.then(fn, fn);
@@ -93,31 +111,64 @@ export class PageSource {
     return run;
   }
 
-  async call(job, op, args) {
+  /** Waits until no other job holds the job's tab for its playlist or profile page. */
+  async waitLease(job, signal) {
+    for (;;) {
+      const lease = this.leases.get(job.tabId);
+      if (!lease || lease.jobId === job.id) return;
+      await abortable(lease.done, signal);
+      job.tabId = await this.platform.pickTab(job.tabId);
+    }
+  }
+
+  async claim(job, signal) {
+    await this.waitLease(job, signal);
+    if (this.leases.get(job.tabId)?.jobId === job.id) return;
+    let release;
+    const done = new Promise((r) => (release = r));
+    this.leases.set(job.tabId, { jobId: job.id, done, release });
+  }
+
+  /** Called when a job stops: other jobs may navigate its tab again. */
+  release(job) {
+    for (const [tabId, lease] of this.leases) {
+      if (lease.jobId !== job.id) continue;
+      this.leases.delete(tabId);
+      lease.release();
+    }
+  }
+
+  async call(job, op, args, opts) {
     job.tabId = await this.platform.pickTab(job.tabId);
     try {
-      return await this.platform.pageCall(job.tabId, op, args);
+      return await this.platform.pageCall(job.tabId, op, args, opts);
     } catch (e) {
-      if (!/No tab with id|Invalid tab|tab was closed/i.test(e.message)) throw e;
+      if (!TAB_GONE.test(e.message) || opts?.reload === false) throw e;
       // The user closed the tab: continue in another SoundCloud tab.
       job.tabId = await this.platform.pickTab(null);
       await this.platform.navigate(job.tabId, job.pageUrl || job.url);
-      return this.platform.pageCall(job.tabId, op, args);
+      return this.platform.pageCall(job.tabId, op, args, opts);
     }
   }
 
   async navigate(job, url) {
     job.tabId = await this.platform.pickTab(job.tabId);
-    await this.platform.navigate(job.tabId, url);
+    try {
+      await this.platform.navigate(job.tabId, url);
+    } catch (e) {
+      if (!TAB_GONE.test(e.message)) throw e;
+      job.tabId = await this.platform.pickTab(null);
+      await this.platform.navigate(job.tabId, url);
+    }
   }
 
   async currentPath(job) {
     return (await this.call(job, 'ping'))?.path || '';
   }
 
-  /** What the page knows about a URL; null if it is not on this page. */
-  peek(job, url) {
-    return this.call(job, 'resolve', { url });
+  /** What the page knows about a URL; null if it is not on this page. `reload: false` never touches the tab. */
+  peek(job, url, opts) {
+    return this.call(job, 'resolve', { url }, opts);
   }
 
   /**
@@ -126,23 +177,28 @@ export class PageSource {
    */
   async resolve(job, url, { signal } = {}) {
     job.tabId = await this.platform.pickTab(job.tabId);
-    return this.withTab(job.tabId, async () => {
-      let res = await this.peek(job, url);
-      if (!res?.data) {
+    let res = await this.withTab(job.tabId, () => this.peek(job, url));
+    if (!res?.data) {
+      await this.waitLease(job, signal);
+      res = await this.withTab(job.tabId, async () => {
         await this.navigate(job, url);
-        res = await this.peek(job, url);
-      }
-      signal?.throwIfAborted();
-      if (!res?.data) throw new Error('Страница SoundCloud не отдала данные: откройте ссылку в браузере и проверьте, что она открывается');
-      if (res.kind === 'track') return res;
+        return this.peek(job, url);
+      });
+    }
+    signal?.throwIfAborted();
+    if (!res?.data) throw new Error('Страница SoundCloud не отдала данные: откройте ссылку в браузере и проверьте, что она открывается');
+    if (res.kind === 'track') return res;
 
-      // Collections need their own page: its list holds the play buttons.
-      let pageUrl = res.kind === 'user' ? `${cleanUrl(res.data.permalink_url || url)}/tracks` : res.data.permalink_url || url;
-      job.pageUrl = pageUrl;
+    // Collections need their own page: its list holds the play buttons. The job
+    // keeps that page in the tab until it ends, so other jobs do not navigate away.
+    const pageUrl = res.kind === 'user' ? `${cleanUrl(res.data.permalink_url || url)}/tracks` : res.data.permalink_url || url;
+    job.pageUrl = pageUrl;
+    await this.claim(job, signal);
+    return this.withTab(job.tabId, async () => {
       const here = await this.currentPath(job);
       if (!samePath(`https://soundcloud.com${here}`, pageUrl)) await this.navigate(job, pageUrl);
       signal?.throwIfAborted();
-      await this.call(job, 'loadAll', { expected: res.kind === 'user' ? 0 : res.data.track_count || res.data.tracks?.length || 0 });
+      await this.call(job, 'loadAll', { expected: res.data.track_count || res.data.tracks?.length || 0 });
       signal?.throwIfAborted();
       const full = await this.peek(job, pageUrl);
       return full?.data ? full : res;
@@ -156,32 +212,53 @@ export class PageSource {
   async grab(job, track, { index = null, fresh = false, signal } = {}) {
     // Without a login every track would wait for the player in vain: fail them at once.
     if (job.blocker) throw new Error(job.blocker);
-    return this.withTab(job.tabId, async () => {
+    job.tabId = await this.platform.pickTab(job.tabId);
+    const args = { id: track.id, permalink: track.permalink_url, index, collection: job.pageUrl || null, fresh };
+    let res = await this.withTab(job.tabId, () => {
       signal?.throwIfAborted();
-      if (job.blocker) throw new Error(job.blocker);
-      const args ={ id: track.id, permalink: track.permalink_url, index, collection: job.pageUrl || null, fresh };
-      let res = await this.call(job, 'grab', args);
-      if (res?.error === 'not-found') {
-        // The track's play button is not on the current page: open the job's page.
+      return this.call(job, 'grab', args);
+    });
+    if (res?.error === 'not-found') {
+      // The track's play button is not on the current page: open the job's page,
+      // once no other job needs the tab for its own list.
+      await this.waitLease(job, signal);
+      res = await this.withTab(job.tabId, async () => {
+        signal?.throwIfAborted();
         await this.navigate(job, job.pageUrl || track.permalink_url || job.url);
         if (job.pageUrl) await this.call(job, 'loadAll', { expected: job.items?.length || 0 });
         signal?.throwIfAborted();
-        res = await this.call(job, 'grab', args);
-        if (res?.error === 'not-found' && job.pageUrl && track.permalink_url) {
+        let again = await this.call(job, 'grab', args);
+        if (again?.error === 'not-found' && job.pageUrl && track.permalink_url) {
           await this.navigate(job, track.permalink_url);
-          res = await this.call(job, 'grab', args);
+          again = await this.call(job, 'grab', args);
+          // Back to the list for the remaining tracks.
+          await this.navigate(job, job.pageUrl);
         }
-      }
-      if (res?.error === 'login') {
-        job.blocker = 'SoundCloud просит войти: без входа плеер не воспроизводит треки. Войдите на soundcloud.com и повторите';
-        throw new Error(job.blocker);
-      }
-      if (res?.error === 'not-found') throw new Error('Не нашёл на странице кнопку воспроизведения этого трека');
-      if (res?.error === 'timeout') throw new Error('Плеер SoundCloud не начал загрузку трека. Проверьте, что трек играет на сайте, и повторите');
-      if (!res?.url) throw new Error('Плеер SoundCloud не выдал ссылку на поток');
-      if (res.preview) throw new Error(PREVIEW);
-      if (/encrypted/.test(res.protocol || '')) throw new Error(DRM);
-      return res;
-    });
+        return again;
+      });
+    }
+    if (res?.error === 'login') {
+      job.blocker = LOGIN;
+      throw new Error(LOGIN);
+    }
+    if (res?.error === 'not-found') throw new Error('Не нашёл на странице кнопку воспроизведения этого трека');
+    if (res?.error === 'timeout') {
+      throw new Error(
+        res.loggedIn === false
+          ? 'Плеер SoundCloud не начал загрузку трека. Похоже, нужен вход: войдите на soundcloud.com и повторите'
+          : 'Плеер SoundCloud не начал загрузку трека. Проверьте, что трек играет на сайте, и повторите',
+      );
+    }
+    if (!res?.url) throw new Error('Плеер SoundCloud не выдал ссылку на поток');
+    let host = '';
+    try {
+      host = new URL(res.url).hostname;
+    } catch {
+      // checked below
+    }
+    if (!STREAM_HOST.test(host) || (res.track && res.track.id !== track.id)) throw new Error('Страница вернула ссылку не на поток этого трека');
+    if (res.preview) throw new Error(PREVIEW);
+    if (/encrypted/.test(res.protocol || '')) throw new Error(DRM);
+    return res;
   }
 }

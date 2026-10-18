@@ -30,16 +30,9 @@ const ZIP_PART_BYTES = 512 * 1024 * 1024;
 
 class Semaphore {
   constructor(limit) {
-    this.limit = limit;
+    this.limit = Math.max(1, limit | 0);
     this.active = 0;
     this.queue = [];
-  }
-  setLimit(n) {
-    const limit = Math.max(1, n | 0);
-    const extra = limit - this.limit;
-    this.limit = limit;
-    // Wake only as many waiters as new slots appeared, keeping FIFO order.
-    for (let i = 0; i < extra && this.queue.length; i++) this.queue.shift()();
   }
   async run(fn) {
     while (this.active >= this.limit) await new Promise((r) => this.queue.push(r));
@@ -126,7 +119,6 @@ export class Engine {
     this.source = new PageSource(platform);
     this.jobs = [];
     this.controllers = new Map();
-    this.trackSlots = new Semaphore(2);
     this._emitTimer = null;
     this._keepAliveTimer = null;
   }
@@ -223,7 +215,7 @@ export class Engine {
 
   enqueue(rawUrl, tabId = null) {
     const url = cleanUrl(rawUrl);
-    if (!isSoundCloudPage(url)) throw new Error('Это не ссылка на трек, плейлист, альбом или профиль SoundCloud');
+    if (!isSoundCloudPage(url) && !isShortLink(url)) throw new Error('Это не ссылка на трек, плейлист, альбом или профиль SoundCloud');
     const existing = this.jobs.find((j) => j.url === url && ACTIVE.has(j.status));
     if (existing) return existing;
     const job = { id: `job${Date.now()}_${++jobSeq}`, url, tabId, kind: null, title: url, artwork: null, status: 'resolving', error: null, items: [], runId: 0 };
@@ -263,7 +255,8 @@ export class Engine {
   /** Short description of what the open tab shows, for the popup (no downloading, no navigation). */
   async inspect(rawUrl, tabId) {
     const job = { tabId, url: cleanUrl(rawUrl) };
-    const res = await this.source.peek(job, job.url);
+    // Looking only: the popup must never reload or navigate the user's tab.
+    const res = await this.source.peek(job, job.url, { reload: false });
     if (!res?.data) throw new Error('Страница ещё не загрузилась');
     const d = res.data;
     const info = { kind: res.kind, title: d.title || d.username, artist: d.user?.username, artwork: d.artwork_url || d.avatar_url };
@@ -292,10 +285,14 @@ export class Engine {
     job.coverCache = new Map();
     try {
       const settings = withDefaults(await this.platform.getSettings());
-      this.trackSlots.setLimit(settings.concurrency);
+      // Per job: a job waiting for a tab another job holds must not starve that job of slots.
+      const slots = new Semaphore(settings.concurrency);
       if (!resume) {
+        if (isShortLink(job.url)) job.url = await expandShortLink(job.url, signal);
         await this.resolveJob(job, signal, settings);
         job.zipMode = job.context.type !== 'single' && settings.playlistAsZip;
+      } else if (job.pageUrl) {
+        await this.source.claim(job, signal);
       }
       if (signal.aborted) return;
       job.zip = job.zipMode
@@ -306,7 +303,7 @@ export class Engine {
       this.emit();
       await Promise.all(
         job.items.map((item) =>
-          item.status === 'queued' ? this.trackSlots.run(() => (signal.aborted ? null : this.processItem(job, item, settings, signal, runId))) : null,
+          item.status === 'queued' ? slots.run(() => (signal.aborted ? null : this.processItem(job, item, settings, signal, runId))) : null,
         ),
       );
       if (signal.aborted) return;
@@ -325,6 +322,7 @@ export class Engine {
       }
     } finally {
       if (this.controllers.get(job.id) === controller) this.controllers.delete(job.id);
+      this.source.release(job);
       if (job.runId === runId) {
         job.coverCache = null;
         job.zip = null; // drop collected audio of a cancelled/failed run
@@ -551,6 +549,16 @@ export class Engine {
 }
 
 // ------------------------------------------------------------------ network
+
+const isShortLink = (url) => /^https:\/\/on\.soundcloud\.com\/[^/]+/.test(url);
+
+/** Share links (on.soundcloud.com/…) only redirect to the real page: follow them. */
+async function expandShortLink(url, signal) {
+  const res = await fetch(url, { signal, credentials: 'omit', redirect: 'follow' });
+  const target = cleanUrl(res.url);
+  if (!isSoundCloudPage(target)) throw new Error('Короткая ссылка не ведёт на трек, плейлист или профиль SoundCloud');
+  return target;
+}
 
 async function fetchWithRetry(url, { signal, retries = 3 } = {}) {
   let delay = 800;

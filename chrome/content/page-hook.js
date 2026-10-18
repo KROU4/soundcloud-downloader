@@ -31,6 +31,7 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   function pathOf(href) {
+    if (!href) return null;
     try {
       const u = new URL(href, location.origin);
       return decodeURIComponent(u.pathname).replace(/\/+$/, '').toLowerCase() || '/';
@@ -38,6 +39,10 @@
       return null;
     }
   }
+
+  /** Same track whether or not the URL carries a private link's secret part (/s-…). */
+  const SECRET = /\/s-[a-z0-9]+$/;
+  const samePlace = (a, b) => !!a && !!b && a.replace(SECRET, '') === b.replace(SECRET, '');
 
   // ------------------------------------------------------------ harvesting
 
@@ -47,10 +52,15 @@
     // object (fresh track_authorization, media) wins over an older one.
     const merged = old ? { ...old, ...obj } : obj;
     if (old?.media && !obj.media) merged.media = old.media;
+    // Compact playlist representations list only the first few tracks.
+    if (old?.tracks?.length > (obj.tracks?.length || 0)) merged.tracks = old.tracks;
     map.set(obj.id, merged);
     if (obj.permalink_url) {
       const p = pathOf(obj.permalink_url);
-      if (p) byPath.set(p, { kind: obj.kind, id: obj.id });
+      if (p) {
+        byPath.set(p, { kind: obj.kind, id: obj.id });
+        if (SECRET.test(p)) byPath.set(p.replace(SECRET, ''), { kind: obj.kind, id: obj.id });
+      }
     }
   }
 
@@ -105,20 +115,25 @@
 
   const XHR = XMLHttpRequest.prototype;
   const xhrOpen = XHR.open;
+  function onXhrLoad() {
+    try {
+      // The URL of the request that just finished (an XHR object can be reused).
+      const target = this.__scdlUrl;
+      if (this.status !== 200 || !target) return;
+      const type = this.responseType;
+      if (type === '' || type === 'text') onApiResponse(target, this.responseText);
+      else if (type === 'json' && this.response) onApiResponse(target, JSON.stringify(this.response));
+    } catch {
+      // never break the site
+    }
+  }
   XHR.open = function (method, url, ...rest) {
     try {
-      if (String(url).includes(API_HOST)) {
-        const target = String(url);
-        this.addEventListener('load', () => {
-          try {
-            if (this.status !== 200) return;
-            const type = this.responseType;
-            if (type === '' || type === 'text') onApiResponse(target, this.responseText);
-            else if (type === 'json' && this.response) onApiResponse(target, JSON.stringify(this.response));
-          } catch {
-            // never break the site
-          }
-        });
+      const target = String(url);
+      this.__scdlUrl = target.includes(API_HOST) ? target : null;
+      if (this.__scdlUrl && !this.__scdlHooked) {
+        this.__scdlHooked = true;
+        this.addEventListener('load', onXhrLoad);
       }
     } catch {
       // never break the site
@@ -145,11 +160,13 @@
   // ------------------------------------------------------- muted capturing
 
   let capturing = 0;
+  /** Stays on until the player is paused again: it may call play() after the link arrived. */
+  let muteHold = false;
   /** Media elements we muted, to unmute once the player is paused again. */
   const mutedByUs = new Set();
   const mediaPlay = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () {
-    if (capturing && !this.muted) {
+    if ((capturing || muteHold) && !this.muted) {
       this.muted = true;
       mutedByUs.add(this);
     }
@@ -160,16 +177,20 @@
   const isPlaying = () => !!playButton()?.classList.contains('playing');
 
   let settleTimer = null;
+  let settleSeq = 0;
   function settleLater() {
     clearTimeout(settleTimer);
+    const seq = ++settleSeq;
     settleTimer = setTimeout(async () => {
       if (capturing) return;
       if (isPlaying()) playButton().click();
       for (const el of mutedByUs) if (!el.paused) el.pause();
       await sleep(300);
-      if (capturing) return;
+      // A new grab started meanwhile: it owns the muted player now.
+      if (capturing || seq !== settleSeq) return;
       for (const el of mutedByUs) el.muted = false;
       mutedByUs.clear();
+      muteHold = false;
     }, 600);
   }
 
@@ -195,7 +216,10 @@
 
   /** The site's sign-in dialog is on screen (it replaces playback for visitors). */
   function loginPrompted() {
-    return [...document.querySelectorAll('.auth-modal, iframe[src*="web-auth"]')].some((el) => el.getClientRects().length > 0);
+    return [...document.querySelectorAll('.auth-modal, iframe[src*="web-auth"]')].some((el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+    });
   }
 
   function loggedIn() {
@@ -204,6 +228,11 @@
   }
 
   // ----------------------------------------------------------- UI driving
+
+  /** Path of the track loaded in the bottom player. */
+  function playerTrackPath() {
+    return pathOf(document.querySelector('.playbackSoundBadge__titleLink')?.getAttribute('href'));
+  }
 
   /**
    * A play button on the page that starts this very track. `index` is its position
@@ -217,17 +246,16 @@
       return document.querySelectorAll(LIST_ITEM_SELECTOR)[index]?.querySelector('.sc-button-play, .playButton') || null;
     }
     for (const a of document.querySelectorAll(TITLE_SELECTOR)) {
-      if (pathOf(a.getAttribute('href')) !== path || a.closest('.playControls')) continue;
+      if (!samePlace(pathOf(a.getAttribute('href')), path) || a.closest('.playControls')) continue;
       const btn = a.closest(ITEM_SELECTOR)?.querySelector('.sc-button-play, .playButton');
       if (btn) return btn;
     }
-    if (pathOf(location.href) === path) {
+    if (samePlace(pathOf(location.href), path)) {
       const hero = document.querySelector('.sc-button-play.sc-button-xxlarge, .sc-button-play.sc-button-xlarge, .fullHero .sc-button-play, .listenHero .sc-button-play');
       if (hero) return hero;
     }
     // The track is already loaded in the bottom player: resume it.
-    const badge = document.querySelector('.playbackSoundBadge__titleLink');
-    if (badge && pathOf(badge.getAttribute('href')) === path && !isPlaying()) return playButton();
+    if (samePlace(playerTrackPath(), path)) return playButton();
     return null;
   }
 
@@ -263,19 +291,34 @@
     return run;
   }
 
+  const usable = (c, fresh) => !!c && !c.preview && !fresh && Date.now() - c.at < CAPTURE_FRESH;
+
   async function grab({ id, permalink, index = null, collection = null, fresh = false }) {
-    const known = captures.get(id);
-    if (!fresh && known && Date.now() - known.at < CAPTURE_FRESH) return grabResult(id, known);
+    if (usable(captures.get(id), fresh)) return grabResult(id, captures.get(id));
     return serialized(async () => {
-      const again = captures.get(id);
-      if (!fresh && again && Date.now() - again.at < CAPTURE_FRESH) return grabResult(id, again);
+      if (usable(captures.get(id), fresh)) return grabResult(id, captures.get(id));
       const track = tracks.get(id) || { id, permalink_url: permalink };
       if (!track.permalink_url) track.permalink_url = permalink;
-      const btn = findPlayButton(track, index, collection);
+      const path = pathOf(track.permalink_url);
+      // Play buttons toggle: clicking the track that is playing would pause it.
+      // Its link is still the one the player streams from.
+      if (samePlace(playerTrackPath(), path) && isPlaying() && captures.get(id) && !fresh) return grabResult(id, captures.get(id));
+      let btn = null;
+      // Right after a navigation the list may still be rendering.
+      for (let i = 0; i < 10 && !btn; i++) {
+        btn = findPlayButton(track, index, collection);
+        if (!btn) await sleep(500);
+      }
       if (!btn) return { error: 'not-found' };
       capturing++;
+      muteHold = true;
       clearTimeout(settleTimer);
       try {
+        if (samePlace(playerTrackPath(), path) && isPlaying()) {
+          // A new link is needed for the playing track: stop it, then start it again.
+          playButton().click();
+          await sleep(400);
+        }
         const since = Date.now();
         btn.scrollIntoView({ block: 'center' });
         btn.click();
@@ -284,7 +327,7 @@
         if (capture) return grabResult(id, capture);
         // Resuming a paused track reuses the link the player already has.
         if (!fresh && captures.get(id)) return grabResult(id, captures.get(id));
-        return { error: loggedIn() ? 'timeout' : 'login' };
+        return { error: 'timeout', loggedIn: loggedIn() };
       } finally {
         capturing--;
         settleLater();
@@ -301,7 +344,8 @@
     for (let i = 0; i < 300 && still < 5; i++) {
       const n = count();
       if (expected && n >= expected) break;
-      if (n === last) still++;
+      // An empty list is still loading (up to ~15 s), not finished.
+      if (n === last && (n > 0 || i > 25)) still++;
       else {
         still = 0;
         last = n;
@@ -342,7 +386,7 @@
     harvestHydration();
     const path = pathOf(url);
     if (!path) return null;
-    let ref = byPath.get(path);
+    let ref = byPath.get(path) || byPath.get(path.replace(SECRET, ''));
     let userList = false;
     const sub = path.match(USER_SUBPAGE);
     if (!ref && sub) {
