@@ -13,6 +13,8 @@ import { PageSource, cleanUrl, describeStreams, isSoundCloudPage, qualityLabel, 
 
 const ACTIVE = new Set(['resolving', 'queued', 'downloading']);
 const SEGMENT_CONCURRENCY = 6;
+/** Streams fetched at once across all jobs (each job also has its own limit). */
+const DOWNLOAD_CONCURRENCY = 4;
 const ZIP_PART_BYTES = 512 * 1024 * 1024;
 
 /**
@@ -119,6 +121,7 @@ export class Engine {
     this.source = new PageSource(platform);
     this.jobs = [];
     this.controllers = new Map();
+    this.downloads = new Semaphore(DOWNLOAD_CONCURRENCY);
     this._emitTimer = null;
     this._keepAliveTimer = null;
   }
@@ -216,9 +219,9 @@ export class Engine {
   enqueue(rawUrl, tabId = null) {
     const url = cleanUrl(rawUrl);
     if (!isSoundCloudPage(url) && !isShortLink(url)) throw new Error('Это не ссылка на трек, плейлист, альбом или профиль SoundCloud');
-    const existing = this.jobs.find((j) => j.url === url && ACTIVE.has(j.status));
+    const existing = this.jobs.find((j) => (j.url === url || j.sourceUrl === url) && ACTIVE.has(j.status));
     if (existing) return existing;
-    const job = { id: `job${Date.now()}_${++jobSeq}`, url, tabId, kind: null, title: url, artwork: null, status: 'resolving', error: null, items: [], runId: 0 };
+    const job = { id: `job${Date.now()}_${++jobSeq}`, url, sourceUrl: url, tabId, kind: null, title: url, artwork: null, status: 'resolving', error: null, items: [], runId: 0 };
     this.jobs.unshift(job);
     this.emit(true);
     job.runPromise = this.run(job);
@@ -424,8 +427,10 @@ export class Engine {
       }
       const quality = qualityLabel(grab);
       try {
-        if (grab.protocol === 'progressive') return { bytes: await fetchBytes(grab.url, { signal, onProgress }), quality };
-        return { bytes: await this.fetchHls(grab.url, signal, onProgress), quality };
+        return await this.downloads.run(async () => {
+          if (grab.protocol === 'progressive') return { bytes: await fetchBytes(grab.url, { signal, onProgress }), quality };
+          return { bytes: await this.fetchHls(grab.url, signal, onProgress), quality };
+        });
       } catch (e) {
         // Signed links expire: a link the player got long ago is answered with 403.
         if (isAbort(e) || attempt > 0 || !e.fatal || grab.age < 30000) throw e;

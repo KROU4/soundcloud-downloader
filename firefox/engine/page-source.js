@@ -72,6 +72,7 @@ export function qualityLabel(grab) {
   return kbps ? `${codec} ${kbps} kbps` : codec;
 }
 
+const LEASED = Symbol('leased');
 const LOGIN = 'SoundCloud просит войти: без входа плеер не воспроизводит треки. Войдите на soundcloud.com и повторите';
 const TAB_GONE = /No tab with id|Invalid tab|tab was closed|Вкладка SoundCloud закрыта/i;
 // Where the site's player streams from: a link elsewhere did not come from the player.
@@ -122,11 +123,27 @@ export class PageSource {
   }
 
   async claim(job, signal) {
+    job.tabId = await this.platform.pickTab(job.tabId);
     await this.waitLease(job, signal);
     if (this.leases.get(job.tabId)?.jobId === job.id) return;
     let release;
     const done = new Promise((r) => (release = r));
     this.leases.set(job.tabId, { jobId: job.id, done, release });
+  }
+
+  /**
+   * Runs a navigating page operation once no other job holds the tab for its list.
+   * The lease is checked again inside the tab lock: one may have been taken meanwhile.
+   */
+  async navigateWhenFree(job, signal, fn) {
+    for (;;) {
+      await this.waitLease(job, signal);
+      const res = await this.withTab(job.tabId, () => {
+        const lease = this.leases.get(job.tabId);
+        return lease && lease.jobId !== job.id ? LEASED : fn();
+      });
+      if (res !== LEASED) return res;
+    }
   }
 
   /** Called when a job stops: other jobs may navigate its tab again. */
@@ -139,7 +156,8 @@ export class PageSource {
   }
 
   async call(job, op, args, opts) {
-    job.tabId = await this.platform.pickTab(job.tabId);
+    // Look-only callers (the popup) use exactly the tab they name: never open one.
+    if (opts?.reload !== false) job.tabId = await this.platform.pickTab(job.tabId);
     try {
       return await this.platform.pageCall(job.tabId, op, args, opts);
     } catch (e) {
@@ -179,8 +197,7 @@ export class PageSource {
     job.tabId = await this.platform.pickTab(job.tabId);
     let res = await this.withTab(job.tabId, () => this.peek(job, url));
     if (!res?.data) {
-      await this.waitLease(job, signal);
-      res = await this.withTab(job.tabId, async () => {
+      res = await this.navigateWhenFree(job, signal, async () => {
         await this.navigate(job, url);
         return this.peek(job, url);
       });
@@ -191,7 +208,9 @@ export class PageSource {
 
     // Collections need their own page: its list holds the play buttons. The job
     // keeps that page in the tab until it ends, so other jobs do not navigate away.
-    const pageUrl = res.kind === 'user' ? `${cleanUrl(res.data.permalink_url || url)}/tracks` : res.data.permalink_url || url;
+    // A private playlist opens only by its secret link (/s-…), which the data may lack.
+    const secret = /^\/[^/]+\/sets\/[^/]+\/s-[^/]+$/.test(new URL(url).pathname);
+    const pageUrl = res.kind === 'user' ? `${cleanUrl(res.data.permalink_url || url)}/tracks` : secret ? cleanUrl(url) : res.data.permalink_url || url;
     job.pageUrl = pageUrl;
     await this.claim(job, signal);
     return this.withTab(job.tabId, async () => {
@@ -221,8 +240,7 @@ export class PageSource {
     if (res?.error === 'not-found') {
       // The track's play button is not on the current page: open the job's page,
       // once no other job needs the tab for its own list.
-      await this.waitLease(job, signal);
-      res = await this.withTab(job.tabId, async () => {
+      res = await this.navigateWhenFree(job, signal, async () => {
         signal?.throwIfAborted();
         await this.navigate(job, job.pageUrl || track.permalink_url || job.url);
         if (job.pageUrl) await this.call(job, 'loadAll', { expected: job.items?.length || 0 });
@@ -242,6 +260,9 @@ export class PageSource {
       throw new Error(LOGIN);
     }
     if (res?.error === 'not-found') throw new Error('Не нашёл на странице кнопку воспроизведения этого трека');
+    if (res?.error === 'stale-in-player') {
+      throw new Error('Ссылка плеера на этот трек устарела, а он сейчас загружен в плеер: переключите трек или обновите страницу SoundCloud и повторите');
+    }
     if (res?.error === 'timeout') {
       throw new Error(
         res.loggedIn === false
@@ -256,7 +277,7 @@ export class PageSource {
     } catch {
       // checked below
     }
-    if (!STREAM_HOST.test(host) || (res.track && res.track.id !== track.id)) throw new Error('Страница вернула ссылку не на поток этого трека');
+    if (!STREAM_HOST.test(host) || res.trackId !== track.id) throw new Error('Страница вернула ссылку не на поток этого трека');
     if (res.preview) throw new Error(PREVIEW);
     if (/encrypted/.test(res.protocol || '')) throw new Error(DRM);
     return res;

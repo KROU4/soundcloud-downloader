@@ -41,8 +41,10 @@
   }
 
   /** Same track whether or not the URL carries a private link's secret part (/s-…). */
-  const SECRET = /\/s-[a-z0-9]+$/;
-  const samePlace = (a, b) => !!a && !!b && a.replace(SECRET, '') === b.replace(SECRET, '');
+  // Only after /user/track or /user/sets/name: a public track may be called "s-express".
+  const SECRET = /^(\/[^/]+\/(?:sets\/)?[^/]+)\/s-[a-z0-9]+$/;
+  const noSecret = (p) => p.replace(SECRET, '$1');
+  const samePlace = (a, b) => !!a && !!b && noSecret(a) === noSecret(b);
 
   // ------------------------------------------------------------ harvesting
 
@@ -59,7 +61,7 @@
       const p = pathOf(obj.permalink_url);
       if (p) {
         byPath.set(p, { kind: obj.kind, id: obj.id });
-        if (SECRET.test(p)) byPath.set(p.replace(SECRET, ''), { kind: obj.kind, id: obj.id });
+        if (SECRET.test(p)) byPath.set(noSecret(p), { kind: obj.kind, id: obj.id });
       }
     }
   }
@@ -105,7 +107,7 @@
     }
     const m = u.pathname.match(STREAM_PATH);
     if (m && json?.url) {
-      const capture = { url: json.url, path: u.pathname, preview: m[2] === 'preview', protocol: m[3], at: Date.now() };
+      const capture = { trackId: Number(m[1]), url: json.url, path: u.pathname, preview: m[2] === 'preview', protocol: m[3], at: Date.now() };
       captures.set(Number(m[1]), capture);
       for (const w of captureWaiters) w(Number(m[1]), capture);
       return;
@@ -274,6 +276,8 @@
     const t = transcodingFor(track, capture);
     return {
       track,
+      // From the stream request itself: the engine checks it against the track it asked for.
+      trackId: capture.trackId,
       url: capture.url,
       age: Date.now() - capture.at,
       preview: capture.preview || !!t?.snipped,
@@ -300,9 +304,11 @@
       const track = tracks.get(id) || { id, permalink_url: permalink };
       if (!track.permalink_url) track.permalink_url = permalink;
       const path = pathOf(track.permalink_url);
-      // Play buttons toggle: clicking the track that is playing would pause it.
-      // Its link is still the one the player streams from.
-      if (samePlace(playerTrackPath(), path) && isPlaying() && captures.get(id) && !fresh) return grabResult(id, captures.get(id));
+      // Play buttons toggle: clicking the track loaded in the player only pauses or
+      // resumes it, without a new link. While it plays, its link is the one in use.
+      const inPlayer = samePlace(playerTrackPath(), path);
+      if (inPlayer && isPlaying() && captures.get(id) && !fresh) return grabResult(id, captures.get(id));
+      if (inPlayer && fresh) return { error: 'stale-in-player' };
       let btn = null;
       // Right after a navigation the list may still be rendering.
       for (let i = 0; i < 10 && !btn; i++) {
@@ -314,11 +320,6 @@
       muteHold = true;
       clearTimeout(settleTimer);
       try {
-        if (samePlace(playerTrackPath(), path) && isPlaying()) {
-          // A new link is needed for the playing track: stop it, then start it again.
-          playButton().click();
-          await sleep(400);
-        }
         const since = Date.now();
         btn.scrollIntoView({ block: 'center' });
         btn.click();
@@ -386,7 +387,7 @@
     harvestHydration();
     const path = pathOf(url);
     if (!path) return null;
-    let ref = byPath.get(path) || byPath.get(path.replace(SECRET, ''));
+    let ref = byPath.get(path) || byPath.get(noSecret(path));
     let userList = false;
     const sub = path.match(USER_SUBPAGE);
     if (!ref && sub) {
