@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SoundCloud Downloader</title>
+    <link rel="stylesheet" href="common.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <img src="../icons/icon-32.png" alt="" width="20" height="20" />
+      <h1>SoundCloud Downloader</h1>
+      <button id="open-options" class="btn btn-ghost" type="button" title="Настройки" aria-label="Настройки">
+        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M11.3 1.5l.4 2.1c.5.2 1 .5 1.4.8l2-.7 1.3 2.3-1.6 1.4c.1.5.1 1.1 0 1.6l1.6 1.4-1.3 2.3-2-.7c-.4.3-.9.6-1.4.8l-.4 2.1H8.7l-.4-2.1c-.5-.2-1-.5-1.4-.8l-2 .7-1.3-2.3 1.6-1.4a4.6 4.6 0 010-1.6L3.6 6l1.3-2.3 2 .7c.4-.3.9-.6 1.4-.8l.4-2.1h2.6zM10 7a3 3 0 100 6 3 3 0 000-6z"
+          />
+        </svg>
+      </button>
+    </header>
+
+    <section id="permission" class="notice hidden">
+      <p>Расширению нужен доступ к soundcloud.com и его серверам с аудио.</p>
+      <button id="grant" class="btn btn-primary" type="button">Разрешить доступ</button>
+    </section>
+
+    <section id="current" class="current hidden" aria-live="polite">
+      <img id="cur-art" class="art" alt="" width="64" height="64" />
+      <div class="cur-body">
+        <div id="cur-kind" class="kind"></div>
+        <div id="cur-title" class="title"></div>
+        <div id="cur-meta" class="muted small"></div>
+        <div id="cur-problem" class="problem hidden"></div>
+      </div>
+      <button id="cur-download" class="btn btn-primary wide" type="button">Скачать</button>
+    </section>
+
+    <form id="url-form" class="url-form">
+      <label for="url" class="sr-only">Ссылка на трек или плейлист</label>
+      <input id="url" type="url" placeholder="Ссылка на трек, плейлист или профиль" autocomplete="off" required />
+      <button class="btn" type="submit">Скачать</button>
+    </form>
+
+    <p id="login-hint" class="hint hidden">
+      Войдите на soundcloud.com, чтобы скачивать оригинальные файлы (если автор разрешил) и качество Go+.
+    </p>
+
+    <section class="jobs">
+      <div class="jobs-head">
+        <h2>Загрузки</h2>
+        <button id="clear" class="btn btn-ghost small" type="button">Очистить завершённые</button>
+      </div>
+      <p id="empty" class="muted empty">Пока ничего не скачивается. Откройте трек или плейлист на SoundCloud и нажмите «Скачать».</p>
+      <ul id="job-list" class="job-list"></ul>
+    </section>
+
+    <template id="job-tpl">
+      <li class="job">
+        <div class="job-row">
+          <img class="job-art" alt="" width="40" height="40" />
+          <div class="job-body">
+            <div class="job-title"></div>
+            <div class="job-status small muted"></div>
+            <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+          </div>
+          <div class="job-actions">
+            <button class="btn btn-ghost small act-retry hidden" type="button">Повторить</button>
+            <button class="btn btn-ghost small act-cancel hidden" type="button">Отмена</button>
+            <button class="btn btn-ghost small act-remove hidden" type="button" aria-label="Убрать из списка">✕</button>
+          </div>
+        </div>
+        <details class="job-items hidden">
+          <summary class="small muted">Треки</summary>
+          <ol></ol>
+        </details>
+      </li>
+    </template>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

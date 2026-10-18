@@ -1,0 +1,69 @@
+{
+  "manifest_version": 3,
+  "name": "SoundCloud Downloader",
+  "short_name": "SC Downloader",
+  "version": "1.0.0",
+  "description": "Скачивание треков, альбомов и плейлистов SoundCloud в лучшем качестве с обложкой, тегами и текстом",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "SoundCloud Downloader",
+    "default_popup": "ui/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "ui/options.html",
+    "open_in_tab": true
+  },
+  "permissions": [
+    "downloads",
+    "storage",
+    "cookies",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "*://soundcloud.com/*",
+    "*://*.soundcloud.com/*",
+    "*://*.sndcdn.com/*",
+    "*://*.soundcloud.cloud/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://m.soundcloud.com/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "type": "module"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "soundcloud-downloader@local.extension",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
+}

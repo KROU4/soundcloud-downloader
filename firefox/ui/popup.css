@@ -1,0 +1,230 @@
+body {
+  width: 400px;
+  min-height: 200px;
+  max-height: 580px;
+  padding: 12px;
+}
+
+.small {
+  font-size: 12px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.top h1 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.notice {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.notice p {
+  margin: 0 0 8px;
+}
+
+.current {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 10px 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.art {
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--border);
+}
+
+.cur-body {
+  min-width: 0;
+}
+
+.kind {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.title {
+  font-weight: 600;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.problem {
+  margin-top: 4px;
+  color: var(--err);
+  font-size: 12px;
+}
+
+.wide {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 36px;
+}
+
+.url-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.hint {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.jobs-head h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.empty {
+  margin: 8px 0;
+}
+
+.job-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.job {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.job-art {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--border);
+}
+
+.job-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.job-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job[data-status='error'] .job-status,
+.item-error {
+  color: var(--err);
+}
+
+.job[data-status='done'] .job-status {
+  color: var(--ok);
+}
+
+.bar {
+  height: 4px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.job[data-status='done'] .bar span {
+  background: var(--ok);
+}
+
+.job[data-status='error'] .bar span {
+  background: var(--err);
+}
+
+.job-actions {
+  display: flex;
+  flex: none;
+}
+
+.job-actions .btn {
+  min-height: 26px;
+}
+
+.job-items {
+  margin: 6px 0 0 50px;
+}
+
+.job-items summary {
+  cursor: pointer;
+}
+
+.job-items ol {
+  max-height: 180px;
+  margin: 4px 0 0;
+  padding-left: 22px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.job-items li {
+  padding: 2px 0;
+}
+
+.item-state {
+  color: var(--muted);
+}
+
+.item-state.done {
+  color: var(--ok);
+}

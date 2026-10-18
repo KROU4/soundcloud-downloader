@@ -1,0 +1,120 @@
+:root {
+  --bg: #ffffff;
+  --surface: #f6f6f7;
+  --border: #e3e3e6;
+  --text: #17171a;
+  --muted: #6b6b73;
+  --accent: #ff5500;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(255, 85, 0, 0.12);
+  --ok: #1a8f3c;
+  --err: #c5221f;
+  --radius: 8px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #18181b;
+    --surface: #222226;
+    --border: #34343a;
+    --text: #ededf0;
+    --muted: #9d9da6;
+    --accent-soft: rgba(255, 106, 31, 0.18);
+    --ok: #4cc26f;
+    --err: #ff6b62;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.btn:hover {
+  border-color: var(--muted);
+}
+
+.btn:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  border-color: var(--accent);
+  filter: brightness(1.06);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 8px;
+}
+
+.btn-ghost:hover {
+  color: var(--text);
+  border-color: transparent;
+}
+
+input[type='text'],
+input[type='url'],
+input[type='number'],
+select {
+  width: 100%;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.hidden {
+  display: none !important;
+}

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Настройки SoundCloud Downloader</title>
+    <link rel="stylesheet" href="common.css" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Настройки</h1>
+
+      <form id="form">
+        <fieldset>
+          <legend>Качество</legend>
+          <label class="check">
+            <input type="checkbox" name="preferOriginal" />
+            <span>
+              Скачивать оригинальный файл, если автор разрешил скачивание
+              <small>Нужен вход на soundcloud.com. Обычно это WAV, FLAC или MP3 320 — лучше любого потока.</small>
+            </span>
+          </label>
+          <label class="field">
+            <span>Предпочтительный кодек потока</span>
+            <select name="preferredCodec">
+              <option value="best">Лучший доступный (рекомендуется)</option>
+              <option value="aac">AAC (.m4a)</option>
+              <option value="mp3">MP3</option>
+              <option value="opus">Opus</option>
+            </select>
+            <small>Если выбранного кодека нет, берётся лучший из доступных.</small>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Обложка и теги</legend>
+          <label class="field">
+            <span>Размер обложки</span>
+            <select name="coverSize">
+              <option value="original">Оригинальный (максимальный)</option>
+              <option value="t500x500">500×500</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" name="avatarFallback" /><span>Если у трека нет обложки, брать аватар автора</span></label>
+          <label class="check"><input type="checkbox" name="playlistAsAlbum" /><span>Название плейлиста записывать как альбом</span></label>
+          <label class="check">
+            <input type="checkbox" name="splitArtistFromTitle" />
+            <span>
+              Разделять «Артист - Название» в заголовке
+              <small>Только когда у трека нет данных от издателя: многие лейблы пишут исполнителя прямо в названии.</small>
+            </span>
+          </label>
+          <label class="check">
+            <input type="checkbox" name="lyricsFromDescription" />
+            <span>
+              Брать текст песни из описания
+              <small>Ищется раздел с заголовком вроде «Lyrics:» или «Текст:».</small>
+            </span>
+          </label>
+          <label class="check"><input type="checkbox" name="descriptionAsLyrics" /><span>Если такого раздела нет, записывать в текст всё описание</span></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Файлы и папки</legend>
+          <label class="field">
+            <span>Папка внутри «Загрузок»</span>
+            <input type="text" name="baseFolder" placeholder="пусто — прямо в «Загрузки»" />
+          </label>
+          <label class="field">
+            <span>Имя файла трека</span>
+            <input type="text" name="trackTemplate" />
+          </label>
+          <label class="field">
+            <span>Папка (или имя ZIP) плейлиста</span>
+            <input type="text" name="playlistFolderTemplate" />
+          </label>
+          <label class="field">
+            <span>Имя файла в плейлисте</span>
+            <input type="text" name="playlistTrackTemplate" />
+          </label>
+          <p class="muted small">
+            Подстановки: <code>{artist}</code> <code>{title}</code> <code>{album}</code> <code>{year}</code> <code>{genre}</code> <code>{index}</code>
+            <code>{playlist}</code> <code>{playlistArtist}</code> <code>{uploader}</code> <code>{id}</code>
+          </p>
+          <label class="check">
+            <input type="checkbox" name="playlistAsZip" />
+            <span>
+              Скачивать плейлисты, альбомы и профили одним ZIP-архивом
+              <small>Внутри — папка плейлиста с треками. Очень большие профили делятся на части по ~512 МБ.</small>
+            </span>
+          </label>
+          <label class="check"><input type="checkbox" name="saveCoverFile" /><span>Добавлять cover.jpg к плейлисту</span></label>
+          <label class="check"><input type="checkbox" name="savePlaylistFile" /><span>Сохранять файл плейлиста .m3u8</span></label>
+          <label class="field narrow">
+            <span>Одновременных загрузок</span>
+            <input type="number" name="concurrency" min="1" max="6" step="1" />
+          </label>
+        </fieldset>
+      </form>
+
+      <div class="actions">
+        <button id="reset" class="btn" type="button">Сбросить настройки</button>
+        <span id="saved" class="muted small" role="status"></span>
+      </div>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
