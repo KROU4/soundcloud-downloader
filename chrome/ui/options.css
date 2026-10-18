@@ -57,6 +57,13 @@ small {
   font-size: 12px;
 }
 
+.note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 code {
   padding: 1px 4px;
   border-radius: 4px;

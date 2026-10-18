@@ -3,13 +3,13 @@
 import { concat, utf8 } from '../lib/bytes.js';
 import { buildPath, renderTemplate, sanitize } from '../lib/filename.js';
 import { imageInfo } from '../lib/image.js';
-import { parseMediaPlaylist } from '../lib/m3u8.js';
+import { bestVariant, parseMediaPlaylist } from '../lib/m3u8.js';
 import { buildMeta, coverCandidates, templateValues } from '../lib/metadata.js';
 import { withDefaults } from '../lib/settings.js';
 import { writeTags } from '../lib/tags/index.js';
 import { defragment } from '../lib/tags/mp4.js';
 import { buildZip } from '../lib/zip.js';
-import { SoundCloudApi, cleanUrl, describeStreams, rankTranscodings, unavailableReason } from './sc-api.js';
+import { PageSource, cleanUrl, describeStreams, isSoundCloudPage, qualityLabel, trackProblem } from './page-source.js';
 
 const ACTIVE = new Set(['resolving', 'queued', 'downloading']);
 const SEGMENT_CONCURRENCY = 6;
@@ -18,7 +18,9 @@ const ZIP_PART_BYTES = 512 * 1024 * 1024;
 /**
  * @typedef {object} Platform
  * @property {() => Promise<object>} getSettings
- * @property {() => Promise<string|null>} getToken  SoundCloud oauth_token cookie
+ * @property {(tabId: number, op: string, args?: object) => Promise<any>} pageCall  request to page-hook.js in a soundcloud.com tab
+ * @property {(preferred?: number|null) => Promise<number>} pickTab  a usable soundcloud.com tab (opens one if needed)
+ * @property {(tabId: number, url: string) => Promise<void>} navigate  loads a URL in the tab and waits until the page is ready
  * @property {(k: string) => Promise<any>} cacheGet
  * @property {(k: string, v: any) => Promise<void>} cacheSet
  * @property {(bytes: Uint8Array | Uint8Array[], filename: string, opts?: { overwrite?: boolean }) => Promise<string>} saveFile  resolves with the final path; an array is saved as consecutive chunks
@@ -112,11 +114,16 @@ function rememberCover(cache, url, bytes) {
 
 let jobSeq = 0;
 
+/** Title and artist for the download list (stubs of not yet loaded tracks have neither). */
+function itemLabels(t) {
+  return { title: t.title || `Трек ${t.id}`, artist: t.publisher_metadata?.artist || t.user?.username || '' };
+}
+
 export class Engine {
   /** @param {Platform} platform */
   constructor(platform) {
     this.platform = platform;
-    this.api = new SoundCloudApi({ getToken: platform.getToken, cacheGet: platform.cacheGet, cacheSet: platform.cacheSet });
+    this.source = new PageSource(platform);
     this.jobs = [];
     this.controllers = new Map();
     this.trackSlots = new Semaphore(2);
@@ -189,7 +196,7 @@ export class Engine {
   async handle(cmd) {
     switch (cmd.cmd) {
       case 'enqueue':
-        return { jobId: this.enqueue(cmd.url).id };
+        return { jobId: this.enqueue(cmd.url, cmd.tabId).id };
       case 'cancel':
         this.cancel(cmd.jobId);
         return { ok: true };
@@ -208,17 +215,18 @@ export class Engine {
       case 'state':
         return this.snapshot();
       case 'inspect':
-        return this.inspect(cmd.url);
+        return this.inspect(cmd.url, cmd.tabId);
       default:
         throw new Error(`Неизвестная команда ${cmd.cmd}`);
     }
   }
 
-  enqueue(rawUrl) {
+  enqueue(rawUrl, tabId = null) {
     const url = cleanUrl(rawUrl);
+    if (!isSoundCloudPage(url)) throw new Error('Это не ссылка на трек, плейлист, альбом или профиль SoundCloud');
     const existing = this.jobs.find((j) => j.url === url && ACTIVE.has(j.status));
     if (existing) return existing;
-    const job = { id: `job${Date.now()}_${++jobSeq}`, url, kind: null, title: url, artwork: null, status: 'resolving', error: null, items: [], runId: 0 };
+    const job = { id: `job${Date.now()}_${++jobSeq}`, url, tabId, kind: null, title: url, artwork: null, status: 'resolving', error: null, items: [], runId: 0 };
     this.jobs.unshift(job);
     this.emit(true);
     job.runPromise = this.run(job);
@@ -239,6 +247,7 @@ export class Engine {
     if (!job || ACTIVE.has(job.status)) return;
     const resume = job.items.length > 0;
     job.error = null;
+    job.blocker = null; // e.g. "log in first": the user may have done it
     job.status = resume ? 'queued' : 'resolving';
     // A ZIP holds the whole playlist, so in ZIP mode every track goes in again.
     const redo = job.zipMode ? ['error', 'cancelled', 'done'] : ['error', 'cancelled'];
@@ -251,23 +260,22 @@ export class Engine {
     job.runPromise = previous.then(() => (job.status === 'cancelled' ? undefined : this.run(job, { resume })));
   }
 
-  /** Short description of a URL for the popup (no downloading). */
-  async inspect(rawUrl) {
-    const res = await this.api.resolve(rawUrl);
-    const token = await this.platform.getToken();
-    const info = { kind: res.kind, title: res.title || res.username, artist: res.user?.username, artwork: res.artwork_url || res.avatar_url, loggedIn: !!token };
+  /** Short description of what the open tab shows, for the popup (no downloading, no navigation). */
+  async inspect(rawUrl, tabId) {
+    const job = { tabId, url: cleanUrl(rawUrl) };
+    const res = await this.source.peek(job, job.url);
+    if (!res?.data) throw new Error('Страница ещё не загрузилась');
+    const d = res.data;
+    const info = { kind: res.kind, title: d.title || d.username, artist: d.user?.username, artwork: d.artwork_url || d.avatar_url };
     if (res.kind === 'track') {
-      const best = rankTranscodings(res.media?.transcodings)[0];
-      info.quality = best ? `${best.codec.toUpperCase()} ${best.kbps} kbps` : null;
-      info.original = !!(res.downloadable && res.has_downloads_left !== false);
-      info.problem = best ? null : unavailableReason(res, { loggedIn: !!token, authRejected: this.api.authRejected });
-      info.streams = describeStreams(res);
+      info.problem = trackProblem(d);
+      info.streams = describeStreams(d);
       info.count = 1;
     } else if (res.kind === 'playlist' || res.kind === 'system-playlist') {
-      info.count = res.track_count ?? res.tracks?.length;
-      info.isAlbum = !!res.is_album;
+      info.count = d.track_count ?? d.tracks?.length;
+      info.isAlbum = !!d.is_album;
     } else if (res.kind === 'user') {
-      info.count = res.track_count;
+      info.count = d.track_count;
     }
     return info;
   }
@@ -327,46 +335,39 @@ export class Engine {
   }
 
   async resolveJob(job, signal, settings) {
-    const res = await this.api.resolve(job.url, { signal });
+    const res = await this.source.resolve(job, job.url, { signal });
+    const d = res.data;
     job.kind = res.kind;
     let tracks;
     if (res.kind === 'track') {
-      job.title = `${res.user?.username ? `${res.user.username} — ` : ''}${res.title}`;
-      job.artwork = res.artwork_url;
+      job.title = `${d.user?.username ? `${d.user.username} — ` : ''}${d.title}`;
+      job.artwork = d.artwork_url;
       job.context = { type: 'single', playlist: null, folder: settings.baseFolder };
-      tracks = [res];
+      tracks = [d];
     } else if (res.kind === 'playlist' || res.kind === 'system-playlist') {
-      job.title = res.title;
-      job.artwork = res.artwork_url || res.tracks?.find((t) => t.artwork_url)?.artwork_url || null;
-      this.emit();
-      tracks = await this.api.playlistTracks(res, { signal });
-      const playlist = { ...res, user: res.user || { username: 'SoundCloud' }, track_count: tracks.length };
+      job.title = d.title;
+      tracks = d.tracks || [];
+      job.artwork = d.artwork_url || d.calculated_artwork_url || tracks.find((t) => t.artwork_url)?.artwork_url || null;
+      const playlist = { ...d, tracks: undefined, user: d.user || { username: 'SoundCloud' }, track_count: tracks.length };
       const name = renderTemplate(settings.playlistFolderTemplate, { playlist: playlist.title, playlistArtist: playlist.user.username }) || playlist.title;
       job.context = { type: 'playlist', playlist, name, folder: [settings.baseFolder, name].filter(Boolean).join('/') };
     } else if (res.kind === 'user') {
-      job.title = `${res.username} — все треки`;
-      job.artwork = res.avatar_url;
-      this.emit();
-      tracks = await this.api.userTracks(res, { signal });
-      job.context = { type: 'user', playlist: null, name: res.username, folder: [settings.baseFolder, res.username].filter(Boolean).join('/') };
+      job.title = `${d.username} — все треки`;
+      job.artwork = d.avatar_url;
+      tracks = res.tracks || [];
+      job.context = { type: 'user', playlist: null, name: d.username, folder: [settings.baseFolder, d.username].filter(Boolean).join('/') };
     } else {
       throw new Error('Эта ссылка не ведёт на трек, плейлист, альбом или профиль');
     }
     if (!tracks.length) throw new Error('Здесь нет треков');
     job.tracks = tracks;
-    job.items = tracks.map((t, index) => ({
-      id: t.id,
-      index,
-      title: t.title || `Трек ${t.id}`,
-      artist: t.publisher_metadata?.artist || t.user?.username || '',
-      status: t._unavailable ? 'error' : 'queued',
-      error: t._unavailable ? 'Трек недоступен (удалён, приватный или заблокирован в регионе)' : null,
-      progress: 0,
-    }));
+    job.items = tracks.map((t, index) => {
+      const problem = trackProblem(t);
+      return { id: t.id, index, ...itemLabels(t), status: problem ? 'error' : 'queued', error: problem, progress: 0 };
+    });
   }
 
   async processItem(job, item, settings, signal, runId) {
-    const track = job.tracks[item.index];
     const ctx = job.context.type === 'playlist' ? { playlist: job.context.playlist, index: item.index } : {};
     const current = () => job.runId === runId;
     item.status = 'downloading';
@@ -378,8 +379,10 @@ export class Engine {
         item.progress = Math.min(0.95, p * 0.95);
         this.emit();
       };
-      const audio = await this.fetchAudio(track, settings, signal, onProgress);
+      const audio = await this.fetchAudio(job, item, signal, onProgress);
       item.quality = audio.quality;
+      // The player loads full track data before playing: tags come from it.
+      const track = job.tracks[item.index];
 
       const meta = buildMeta(track, { ...ctx, settings });
       const cover = await this.fetchCover(job, coverCandidates(track, ctx.playlist, settings), signal);
@@ -412,45 +415,34 @@ export class Engine {
     }
   }
 
-  /** Original file if allowed, otherwise the best full-length stream. */
-  async fetchAudio(track, settings, signal, onProgress) {
-    if (settings.preferOriginal && track.downloadable && track.has_downloads_left !== false && (await this.platform.getToken())) {
-      const url = await this.api.originalDownloadUrl(track, { signal });
-      if (url) {
-        try {
-          const { bytes, name } = await fetchFile(url, { signal, onProgress });
-          // Extension from the server's file name: covers formats we cannot sniff (WMA, AMR…).
-          return { bytes, quality: 'Оригинал', ext: name.match(/\.([a-z0-9]{2,5})$/i)?.[1].toLowerCase() };
-        } catch (e) {
-          if (isAbort(e)) throw e;
-          // fall back to streaming
-        }
+  /** The stream the site's player received for this track; a stale link is fetched again once. */
+  async fetchAudio(job, item, signal, onProgress) {
+    for (let attempt = 0; ; attempt++) {
+      const index = job.context.type === 'single' ? null : item.index;
+      const grab = await this.source.grab(job, job.tracks[item.index], { index, fresh: attempt > 0, signal });
+      if (grab.track) {
+        job.tracks[item.index] = { ...job.tracks[item.index], ...grab.track };
+        Object.assign(item, itemLabels(job.tracks[item.index]));
       }
-    }
-    const ranked = rankTranscodings(track.media?.transcodings, settings.preferredCodec);
-    if (!ranked.length) {
-      const reason = unavailableReason(track, { loggedIn: !!(await this.platform.getToken()), authRejected: this.api.authRejected });
-      throw new Error(`${reason}. Потоки: ${describeStreams(track)}`);
-    }
-    let lastError;
-    for (const { t, codec, kbps } of ranked) {
+      const quality = qualityLabel(grab);
       try {
-        const streamUrl = await this.api.streamUrl(t, track, { signal });
-        const quality = `${codec.toUpperCase()} ${kbps} kbps`;
-        if (t.format.protocol === 'progressive') {
-          return { bytes: await fetchBytes(streamUrl, { signal, onProgress }), quality };
-        }
-        return { bytes: await this.fetchHls(streamUrl, signal, onProgress), quality };
+        if (grab.protocol === 'progressive') return { bytes: await fetchBytes(grab.url, { signal, onProgress }), quality };
+        return { bytes: await this.fetchHls(grab.url, signal, onProgress), quality };
       } catch (e) {
-        if (isAbort(e)) throw e;
-        lastError = e;
+        // Signed links expire: a link the player got long ago is answered with 403.
+        if (isAbort(e) || attempt > 0 || !e.fatal || grab.age < 30000) throw e;
       }
     }
-    throw lastError;
   }
 
   async fetchHls(playlistUrl, signal, onProgress) {
-    const text = await (await fetchWithRetry(playlistUrl, { signal })).text();
+    let text = await (await fetchWithRetry(playlistUrl, { signal })).text();
+    // Adaptive streams start with a master playlist: take its best variant.
+    const variant = bestVariant(text, playlistUrl);
+    if (variant) {
+      playlistUrl = variant;
+      text = await (await fetchWithRetry(playlistUrl, { signal })).text();
+    }
     const { map, segments } = parseMediaPlaylist(text, playlistUrl);
     let done = 0;
     const total = segments.length + (map ? 1 : 0);

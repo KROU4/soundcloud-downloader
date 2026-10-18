@@ -20,6 +20,12 @@
   display: none;
 }
 
+/* Bottom player bar: after Like, Follow and Next up (the last of them has no margin). */
+.playbackSoundBadge__actions .scdl-btn {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 .scdl-btn[data-state='busy'] {
   color: #ff5500 !important;
   border-color: #ff5500 !important;

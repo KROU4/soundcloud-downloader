@@ -1,6 +1,6 @@
 // Background: Chromium service worker or Firefox event page (same file).
 //  - Chromium: the engine lives in an offscreen document (needs DOM for blob URLs);
-//    this worker routes commands to it and provides downloads/cookies/storage.
+//    this worker routes commands to it and provides downloads, tabs and storage.
 //  - Firefox: the background page has a DOM, so the engine runs right here.
 import { BLOB_TYPE, SC_TAB_PATTERNS, call, ext, onMessage } from './lib/browser.js';
 import { SETTINGS_KEY } from './lib/settings.js';
@@ -9,33 +9,86 @@ const IS_SERVICE_WORKER = typeof ServiceWorkerGlobalScope !== 'undefined' && glo
 
 // ------------------------------------------------------------ platform services
 
-/**
- * SoundCloud session token (the site keeps it in the `oauth_token` cookie). Without
- * it the API serves only 30-second previews of many label tracks, so every Firefox
- * privacy mode has to be covered: first-party isolation makes a plain get() throw,
- * and containers keep cookies in their own stores.
- */
-async function getToken() {
-  const query = { url: 'https://soundcloud.com/', name: 'oauth_token' };
-  for (const extra of [{}, { firstPartyDomain: 'soundcloud.com' }]) {
+// SoundCloud tabs: the engine takes track data and stream links from the site's own
+// player in one of them (see content/page-hook.js) instead of calling the API.
+
+const SC_PAGE = /^https:\/\/(m\.|www\.)?soundcloud\.com\//;
+const NOT_READY = /Receiving end does not exist|Could not establish connection|message port closed|не ответил/i;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function tabMessage(tabId, op, args) {
+  const res = await ext.tabs.sendMessage(tabId, { to: 'page', op, args });
+  if (!res) throw new Error('Страница SoundCloud не ответила');
+  if (!res.ok) throw new Error(res.error);
+  return res.result;
+}
+
+/** Waits until the tab's content script and page hook answer and the page has its data. */
+async function waitReady(tabId, timeout = 30000) {
+  const until = Date.now() + timeout;
+  let lastError = null;
+  while (Date.now() < until) {
     try {
-      const cookie = await ext.cookies.get({ ...query, ...extra });
-      if (cookie?.value) return cookie.value;
-    } catch {
-      // try the next variant
+      const tab = await ext.tabs.get(tabId);
+      if (tab.status === 'complete' || tab.status === undefined) {
+        const state = await tabMessage(tabId, 'ping');
+        if (state?.ready) return state;
+      }
+    } catch (e) {
+      if (/No tab with id|Invalid tab/i.test(e.message)) throw new Error('Вкладка SoundCloud закрыта');
+      lastError = e;
     }
+    await sleep(300);
   }
+  throw new Error(`Страница SoundCloud не загрузилась${lastError ? `: ${lastError.message}` : ''}`);
+}
+
+async function pageCall(tabId, op, args) {
   try {
-    const stores = ext.cookies.getAllCookieStores ? await ext.cookies.getAllCookieStores() : [{ id: undefined }];
-    for (const store of stores) {
-      const all = await ext.cookies.getAll({ domain: 'soundcloud.com', name: 'oauth_token', storeId: store.id, firstPartyDomain: null });
-      const found = all.find((c) => c.value);
-      if (found) return found.value;
-    }
-  } catch {
-    // Chromium rejects firstPartyDomain; the plain get() above already covered it
+    return await tabMessage(tabId, op, args);
+  } catch (e) {
+    if (!NOT_READY.test(e.message)) throw e;
+    // The page was opened before the extension was (re)loaded, or is still loading:
+    // reload it so our scripts are in place before the site's player starts.
+    const tab = await ext.tabs.get(tabId);
+    if (tab.status === 'complete') await ext.tabs.reload(tabId);
+    await waitReady(tabId);
+    return tabMessage(tabId, op, args);
   }
-  return null;
+}
+
+async function navigateTab(tabId, url) {
+  // Wait for the navigation to start, so the old page does not answer the ping.
+  const started = new Promise((resolve) => {
+    const timer = setTimeout(done, 5000);
+    function done() {
+      clearTimeout(timer);
+      ext.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }
+    function listener(id, change) {
+      if (id === tabId && change.status === 'loading') done();
+    }
+    ext.tabs.onUpdated.addListener(listener);
+  });
+  await ext.tabs.update(tabId, { url });
+  await started;
+  await waitReady(tabId);
+}
+
+/** The tab a job works in: the given one if it still shows SoundCloud, else any SoundCloud tab, else a new one. */
+async function pickTab(preferred) {
+  if (preferred != null) {
+    const tab = await ext.tabs.get(preferred).catch(() => null);
+    if (tab && SC_PAGE.test(tab.url || '')) return tab.id;
+  }
+  const tabs = await ext.tabs.query({ url: SC_TAB_PATTERNS });
+  const usable = tabs.filter((t) => SC_PAGE.test(t.url || ''));
+  const best = usable.find((t) => t.active) || usable[0];
+  if (best) return best.id;
+  const created = await ext.tabs.create({ url: 'https://soundcloud.com/', active: true });
+  await waitReady(created.id);
+  return created.id;
 }
 
 async function getSettings() {
@@ -147,7 +200,9 @@ if (!IS_SERVICE_WORKER) {
     ({ Engine }) =>
       new Engine({
         getSettings,
-        getToken,
+        pageCall,
+        pickTab,
+        navigate: navigateTab,
         cacheGet,
         cacheSet,
         broadcast,
@@ -175,10 +230,11 @@ async function engineCall(cmd) {
 
 // ------------------------------------------------------------------ messaging
 
-// Popup, options and content scripts talk to the engine through here.
+// Popup, options and content scripts talk to the engine through here. A button on
+// a SoundCloud page ties the job to that tab: its player is used for the download.
 onMessage(
   (msg) => msg.to === 'engine',
-  (msg) => engineCall(msg),
+  (msg, sender) => engineCall({ ...msg, tabId: msg.tabId ?? sender.tab?.id ?? null }),
 );
 
 // Requests coming from the offscreen document (Chromium only).
@@ -190,8 +246,12 @@ onMessage(
         return download(msg.url, msg.filename, { overwrite: !!msg.overwrite });
       case 'findDownload':
         return findDownload(msg.url);
-      case 'getToken':
-        return getToken();
+      case 'pageCall':
+        return pageCall(msg.tabId, msg.pageOp, msg.args);
+      case 'pickTab':
+        return pickTab(msg.preferred);
+      case 'navigate':
+        return navigateTab(msg.tabId, msg.url);
       case 'getSettings':
         return getSettings();
       case 'cacheGet':
@@ -220,7 +280,7 @@ ext.runtime.onInstalled.addListener(() => {
   });
 });
 
-ext.contextMenus.onClicked.addListener((info) => {
+ext.contextMenus.onClicked.addListener((info, tab) => {
   const url = info.menuItemId === MENU_LINK ? info.linkUrl : info.pageUrl;
-  if (url) engineCall({ cmd: 'enqueue', url }).catch((e) => console.error('[scdl]', e));
+  if (url) engineCall({ cmd: 'enqueue', url, tabId: tab?.id ?? null }).catch((e) => console.error('[scdl]', e));
 });

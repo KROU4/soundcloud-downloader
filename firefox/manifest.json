@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "SoundCloud Downloader",
   "short_name": "SC Downloader",
-  "version": "1.0.0",
-  "description": "Скачивание треков, альбомов и плейлистов SoundCloud в лучшем качестве с обложкой, тегами и текстом",
+  "version": "1.1.0",
+  "description": "Скачивание треков, альбомов и плейлистов SoundCloud прямо из плеера сайта — с обложкой, тегами и текстом, без обращения к API",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -25,7 +25,6 @@
   "permissions": [
     "downloads",
     "storage",
-    "cookies",
     "contextMenus"
   ],
   "host_permissions": [
@@ -35,6 +34,17 @@
     "*://*.soundcloud.cloud/*"
   ],
   "content_scripts": [
+    {
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://m.soundcloud.com/*"
+      ],
+      "js": [
+        "content/page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://soundcloud.com/*",

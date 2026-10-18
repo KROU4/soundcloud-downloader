@@ -1,8 +1,4 @@
 export const DEFAULT_SETTINGS = {
-  /** Use the uploader's original file when downloads are enabled (needs SoundCloud login). */
-  preferOriginal: true,
-  /** best | aac | mp3 | opus — codec preference for streamed audio. */
-  preferredCodec: 'best',
   /** original | t500x500 */
   coverSize: 'original',
   /** Use the artist avatar when a track has no artwork. */

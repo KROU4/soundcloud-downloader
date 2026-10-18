@@ -132,10 +132,10 @@ function render(state) {
   }
 }
 
-async function showCurrent(url) {
+async function showCurrent(url, tabId) {
   const box = $('current');
   try {
-    const info = await engine('inspect', { url });
+    const info = await engine('inspect', { url, tabId });
     box.classList.remove('hidden');
     if (info.artwork) $('cur-art').src = info.artwork;
     $('cur-kind').textContent = (info.isAlbum ? 'Альбом' : KIND[info.kind]) || info.kind;
@@ -143,13 +143,9 @@ async function showCurrent(url) {
     const meta = [];
     if (info.artist && info.kind !== 'user') meta.push(info.artist);
     if (info.kind !== 'track' && info.count) meta.push(`${info.count} ${plural(info.count, 'трек', 'трека', 'треков')}`);
-    if (info.kind === 'track') {
-      if (info.original && info.loggedIn) meta.push('Оригинальный файл');
-      else if (info.quality) meta.push(info.quality);
-    }
     $('cur-meta').textContent = meta.join(' · ');
     if (info.problem) {
-      $('cur-problem').textContent = `${info.problem}. Потоки: ${info.streams}${info.loggedIn ? '' : ' · вход не найден'}`;
+      $('cur-problem').textContent = `${info.problem}. Потоки: ${info.streams}`;
       $('cur-problem').classList.remove('hidden');
     }
     const btn = $('cur-download');
@@ -157,7 +153,7 @@ async function showCurrent(url) {
     btn.textContent = info.kind === 'track' ? 'Скачать трек' : info.kind === 'user' ? 'Скачать все треки' : `Скачать ${info.isAlbum ? 'альбом' : 'плейлист'}`;
     btn.onclick = async () => {
       btn.disabled = true;
-      await engine('enqueue', { url });
+      await engine('enqueue', { url, tabId });
       btn.disabled = false;
     };
   } catch {
@@ -180,11 +176,14 @@ async function init() {
     if (msg?.to === 'ui' && msg.type === 'state') render(msg.state);
   });
 
+  const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
+  const scTab = tab?.url && /^https:\/\/(m\.|www\.)?soundcloud\.com\//.test(tab.url) ? tab : null;
+
   $('url-form').onsubmit = async (e) => {
     e.preventDefault();
     const input = $('url');
     try {
-      await engine('enqueue', { url: input.value });
+      await engine('enqueue', { url: input.value, tabId: scTab?.id ?? null });
       input.value = '';
     } catch (err) {
       input.setCustomValidity(err.message);
@@ -194,11 +193,14 @@ async function init() {
   };
   $('clear').onclick = () => engine('clear');
 
-  const cookie = await ext.cookies.get({ url: 'https://soundcloud.com/', name: 'oauth_token' }).catch(() => null);
-  $('login-hint').classList.toggle('hidden', !!cookie?.value);
-
-  const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
-  if (tab?.url && /^https:\/\/(m\.|www\.|on\.)?soundcloud\.com\/[^/?#]+/.test(tab.url)) showCurrent(tab.url);
+  if (scTab) {
+    // The site's player needs a logged-in session; the page itself knows whether there is one.
+    ext.tabs
+      .sendMessage(scTab.id, { to: 'page', op: 'ping' })
+      .then((res) => $('login-hint').classList.toggle('hidden', !res?.ok || res.result?.loggedIn !== false))
+      .catch(() => {});
+    if (/^https:\/\/(m\.|www\.)?soundcloud\.com\/[^/?#]+/.test(scTab.url)) showCurrent(scTab.url, scTab.id);
+  }
 
   render(await engine('state'));
 }

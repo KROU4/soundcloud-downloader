@@ -1,3 +1,16 @@
+/** URL of the highest-bandwidth variant if `text` is a master playlist, else null. */
+export function bestVariant(text, baseUrl) {
+  const lines = text.split(/\r?\n/).map((l) => l.trim());
+  let best = null;
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
+    const bandwidth = Number(lines[i].match(/[:,]BANDWIDTH=(\d+)/)?.[1]) || 0;
+    const uri = lines.slice(i + 1).find((l) => l && !l.startsWith('#'));
+    if (uri && (!best || bandwidth > best.bandwidth)) best = { bandwidth, url: new URL(uri, baseUrl).href };
+  }
+  return best?.url || null;
+}
+
 /** Parses an HLS media playlist. Encrypted (DRM) playlists are rejected. */
 export function parseMediaPlaylist(text, baseUrl) {
   const lines = text.split(/\r?\n/).map((l) => l.trim());

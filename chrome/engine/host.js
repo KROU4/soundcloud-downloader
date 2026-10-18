@@ -1,5 +1,5 @@
 // Chromium offscreen document: hosts the engine. Only chrome.runtime is available
-// here, so storage, cookies and downloads are requested from the service worker.
+// here, so storage, tabs and downloads are requested from the service worker.
 // (Not in an "offscreen/" folder: some Chromium builds refuse to serve that path.)
 import { Engine } from './engine.js';
 import { BLOB_TYPE, call, onMessage } from '../lib/browser.js';
@@ -18,7 +18,9 @@ async function waitForDownload(url, originalError) {
 
 const engine = new Engine({
   getSettings: () => bg('getSettings'),
-  getToken: () => bg('getToken'),
+  pageCall: (tabId, pageOp, args) => bg('pageCall', { tabId, pageOp, args }),
+  pickTab: (preferred = null) => bg('pickTab', { preferred }),
+  navigate: (tabId, url) => bg('navigate', { tabId, url }),
   cacheGet: (key) => bg('cacheGet', { key }),
   cacheSet: (key, value) => bg('cacheSet', { key, value }),
   broadcast: (state) => bg('broadcast', { state }).catch(() => {}),
