@@ -15,7 +15,8 @@ const FIREFOX_ONLY = new Set(['manifest.json']);
 const check = process.argv.includes('--check');
 
 function list(dir, base = dir) {
-  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+  // Dot entries are tool caches (.ruff_cache…), never part of the extension.
+  return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => !e.name.startsWith('.')).flatMap((e) => {
     const full = path.join(dir, e.name);
     return e.isDirectory() ? list(full, base) : [path.relative(base, full).split(path.sep).join('/')];
   });
