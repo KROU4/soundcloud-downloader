@@ -1,7 +1,7 @@
 // Download engine. Runs in a DOM context: the offscreen document in Chromium,
 // the background page in Firefox. All browser specifics live in `platform`.
 import { concat, utf8 } from '../lib/bytes.js';
-import { buildPath, renderTemplate, sanitize } from '../lib/filename.js';
+import { buildPath, renderTemplate } from '../lib/filename.js';
 import { imageInfo } from '../lib/image.js';
 import { bestVariant, parseMediaPlaylist } from '../lib/m3u8.js';
 import { buildMeta, coverCandidates, templateValues } from '../lib/metadata.js';
@@ -299,7 +299,7 @@ export class Engine {
       }
       if (signal.aborted) return;
       job.zip = job.zipMode
-        ? { entries: [], bytes: 0, part: 0, names: new Set(), root: sanitize(job.context.name, 80), baseFolder: settings.baseFolder }
+        ? { entries: [], bytes: 0, part: 0, names: new Set(), baseFolder: settings.baseFolder }
         : null;
       job.archives = [];
       job.status = 'downloading';
@@ -540,7 +540,8 @@ export class Engine {
     job.phase = 'zipping';
     this.emit(true);
     try {
-      const chunks = buildZip(entries.map((e) => ({ name: `${zip.root}/${e.name}`, data: e.data })));
+      // Files sit in the archive root: unpacking it gives the tracks, not a folder with them.
+      const chunks = buildZip(entries.map((e) => ({ name: e.name, data: e.data })));
       job.archives.push(await this.platform.saveFile(chunks, buildPath(zip.baseFolder, name, 'zip'), { overwrite: true }));
     } catch (e) {
       if (isAbort(e)) throw e;
