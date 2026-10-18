@@ -1,2 +1,5 @@
 *.zip
 .claude/
+.ruff_cache/
+web-ext-artifacts/
+node_modules/
