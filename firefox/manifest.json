@@ -29,10 +29,10 @@
     "contextMenus"
   ],
   "host_permissions": [
-    "*://soundcloud.com/*",
-    "*://*.soundcloud.com/*",
-    "*://*.sndcdn.com/*",
-    "*://*.soundcloud.cloud/*"
+    "https://soundcloud.com/*",
+    "https://*.soundcloud.com/*",
+    "https://*.sndcdn.com/*",
+    "https://*.soundcloud.cloud/*"
   ],
   "content_scripts": [
     {
@@ -76,5 +76,6 @@
         ]
       }
     }
-  }
+  },
+  "incognito": "not_allowed"
 }

@@ -38,7 +38,7 @@
    - Single purpose — текст ниже;
    - Permission justification — по разрешению, тексты ниже;
    - Remote code: **No, I am not using remote code**;
-   - Data usage: ничего не отмечать, расширение не собирает данные. Поставить все три галочки соответствия;
+   - Data usage: отметьте **Authentication information** (читается cookie сессии SoundCloud) и **Website content** (читаются данные страниц soundcloud.com). Поставьте все три галочки соответствия, включая Limited Use: данные не покидают браузер и SoundCloud;
    - Privacy policy URL — см. выше.
 5. Вкладка **Distribution**: бесплатно, видимость *Public* или *Unlisted*, регионы — все.
 6. **Submit for review.** Проверка обычно занимает от 1 до 7 дней, иногда дольше.
@@ -58,14 +58,14 @@
 2. **Submit a New Add-on**. Выберите способ распространения:
    - **On this site** — публичный листинг, нужна ручная проверка;
    - **On your own** — Unlisted: подпись приходит автоматически, установка по своей ссылке на `.xpi`.
-3. Загрузите `soundcloud-downloader-firefox-<версия>.zip`. Исходники отдельно прикладывать не нужно: код не минифицирован и не собирается сборщиком.
+3. Загрузите `soundcloud-downloader-firefox-<версия>.zip`. Исходники отдельно прикладывать не нужно: код не минифицирован и не собирается сборщиком. В заметках для проверяющего напишите: cookie `oauth_token` уходит только на `api-v2.soundcloud.com` (сервис, которому она принадлежит), поэтому в манифесте `data_collection_permissions: none`; скрипт в MAIN world на soundcloud.com только читает ответы API сайта и нажимает его кнопку воспроизведения; DRM не обходится.
 4. Для листинга: название, описание (тексты ниже), категория *Download Management*, ссылка на политику конфиденциальности, скриншоты из `store/`.
 5. **Автоматически, из релиза.** Создайте API-ключи (Developer Hub → Tools → Manage API Keys) и добавьте их в секреты репозитория как `AMO_JWT_ISSUER` и `AMO_JWT_SECRET`. Тогда каждый тег `v*` будет сам подписывать `.xpi` (канал unlisted) и прикладывать его к релизу GitHub.
 
    Вручную то же самое:
 
    ```bash
-   npx web-ext@8 sign --source-dir firefox --channel unlisted --api-key <issuer> --api-secret <secret>
+   npx web-ext@8.10.0 sign --source-dir firefox --channel unlisted --api-key <issuer> --api-secret <secret>
    ```
 
 ## Opera Add-ons (по желанию)

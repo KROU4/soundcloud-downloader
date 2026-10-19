@@ -21,6 +21,8 @@ import {
 // Containers whose children start right after the 8/16-byte box header.
 const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'udta', 'mvex', 'moof', 'traf', 'dinf']);
 
+const MAX_TRUN_SAMPLES = 1_000_000;
+
 export function parseBoxes(b, start = 0, end = b.length) {
   const boxes = [];
   let o = start;
@@ -145,6 +147,8 @@ function collectSamples(seg, trex, acc) {
         const tf = readU32be(seg, trun.start + 8) & 0xffffff;
         let q = trun.start + 12;
         const count = readU32be(seg, q);
+        // A crafted file could claim billions of samples: audio segments hold a few hundred.
+        if (count > MAX_TRUN_SAMPLES) throw new Error('Повреждённый сегмент: слишком много сэмплов');
         q += 4;
         if (tf & 0x1) {
           pos = base + (readU32be(seg, q) | 0);
@@ -321,14 +325,15 @@ export function buildMetaBox(meta) {
 function shiftOffsets(b, container, from, delta) {
   for (const k of kids(b, container)) {
     if (k.type === 'stco') {
-      const n = readU32be(b, k.start + 12);
+      // Never trust the stored count beyond what the box can actually hold.
+      const n = Math.min(readU32be(b, k.start + 12), Math.floor((k.end - k.start - 16) / 4));
       for (let i = 0; i < n; i++) {
         const o = k.start + 16 + i * 4;
         const v = readU32be(b, o);
         if (v >= from) writeU32be(b, o, v + delta);
       }
     } else if (k.type === 'co64') {
-      const n = readU32be(b, k.start + 12);
+      const n = Math.min(readU32be(b, k.start + 12), Math.floor((k.end - k.start - 16) / 8));
       for (let i = 0; i < n; i++) {
         const o = k.start + 16 + i * 8;
         const v = readU64be(b, o);

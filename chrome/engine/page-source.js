@@ -2,6 +2,7 @@
 // source. content/page-hook.js watches what the site's own player loads and starts
 // playback through the site's play buttons when a track is needed.
 import { DRM_REASON, cleanUrl, isEncrypted } from './sc-api.js';
+import { isScPageUrl } from '../lib/hosts.js';
 
 const PAGE_RESERVED = /^\/(you|search|charts|settings|stations|feed|upload|messages|notifications|pages)(\/|$)/;
 
@@ -184,6 +185,8 @@ export class PageSource {
     // A private playlist opens only by its secret link (/s-…), which the data may lack.
     const secret = /^\/[^/]+\/sets\/[^/]+\/s-[^/]+$/.test(new URL(url).pathname);
     const pageUrl = res.kind === 'user' ? `${cleanUrl(res.data.permalink_url || url)}/tracks` : secret ? cleanUrl(url) : res.data.permalink_url || url;
+    // The page's data is not trusted: only a soundcloud.com page may become the job's page.
+    if (!isScPageUrl(pageUrl)) throw new Error('Страница вернула недопустимую ссылку');
     job.pageUrl = pageUrl;
     await this.claim(job, signal);
     return this.withTab(job.tabId, async () => {
@@ -215,7 +218,9 @@ export class PageSource {
       // once no other job needs the tab for its own list.
       res = await this.navigateWhenFree(job, signal, async () => {
         signal?.throwIfAborted();
-        await this.navigate(job, job.pageUrl || track.permalink_url || job.url);
+        // A private track opens only by its secret link (the job's own URL).
+        const own = /\/s-[^/]+$/.test(new URL(job.url).pathname) ? job.url : null;
+        await this.navigate(job, job.pageUrl || own || track.permalink_url || job.url);
         if (job.pageUrl) await this.call(job, 'loadAll', { expected: job.items?.length || 0 });
         signal?.throwIfAborted();
         let again = await this.call(job, 'grab', args);

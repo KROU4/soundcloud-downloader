@@ -115,6 +115,22 @@ export function unavailableReason(track, { loggedIn = false, authRejected = fals
   return 'Нет подходящего формата потока';
 }
 
+/**
+ * Marks track objects fetched with a session SoundCloud accepted (`_authed`): a preview
+ * served to such a session is a Go+ restriction, not a missing login.
+ */
+function markSession(node, authed, depth = 0) {
+  if (!node || typeof node !== 'object' || depth > 3) return;
+  if (Array.isArray(node)) {
+    for (const x of node) markSession(x, authed, depth + 1);
+    return;
+  }
+  if (node.kind === 'track' && node.media) node._authed = authed;
+  for (const k of ['collection', 'tracks', 'track']) if (node[k]) markSession(node[k], authed, depth + 1);
+}
+
+const isTrackId = (id) => Number.isSafeInteger(id) && id > 0;
+
 export class SoundCloudApi {
   /**
    * @param {{ getToken: () => Promise<string|null>, cacheGet: (k:string)=>Promise<any>, cacheSet: (k:string,v:any)=>Promise<void> }} deps
@@ -129,15 +145,28 @@ export class SoundCloudApi {
     this.authRejected = false;
   }
 
-  async clientId(force = false) {
-    if (!force && this._clientId) return this._clientId;
-    if (!force) {
-      const cached = await this.cacheGet(CLIENT_ID_KEY);
-      if (cached?.value && Date.now() - cached.at < CLIENT_ID_TTL) return (this._clientId = cached.value);
-    }
-    this._clientId = await this.discoverClientId();
-    await this.cacheSet(CLIENT_ID_KEY, { value: this._clientId, at: Date.now() });
-    return this._clientId;
+  async clientId() {
+    if (this._clientId) return this._clientId;
+    const cached = await this.cacheGet(CLIENT_ID_KEY);
+    if (cached?.value && Date.now() - cached.at < CLIENT_ID_TTL) return (this._clientId = cached.value);
+    return this.refreshClientId(null);
+  }
+
+  /**
+   * Looks the client_id up again unless someone already replaced `stale` meanwhile.
+   * Parallel callers share one lookup (it downloads the site's scripts).
+   */
+  async refreshClientId(stale) {
+    if (stale && this._clientId && this._clientId !== stale) return this._clientId;
+    this._discovering ??= (async () => {
+      const id = await this.discoverClientId();
+      this._clientId = id;
+      await this.cacheSet(CLIENT_ID_KEY, { value: id, at: Date.now() });
+      return id;
+    })().finally(() => {
+      this._discovering = null;
+    });
+    return this._discovering;
   }
 
   /** client_id is embedded in soundcloud.com's JS bundles. */
@@ -156,32 +185,40 @@ export class SoundCloudApi {
     throw new ApiError('Не удалось получить client_id SoundCloud. Откройте soundcloud.com и попробуйте снова');
   }
 
-  async request(pathOrUrl, params = {}, { signal, auth = true } = {}) {
+  /**
+   * GET to the API. `refresh: false` skips the client_id lookup on 401/403 (for
+   * endpoints where those statuses are expected answers, like /download).
+   */
+  async request(pathOrUrl, params = {}, { signal, auth = true, refresh = true } = {}) {
     let token = auth ? await this.getToken() : null;
-    let refreshed = false;
+    let refreshed = !refresh;
     for (;;) {
       const url = new URL(pathOrUrl.startsWith('http') ? pathOrUrl : API + pathOrUrl);
       for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) url.searchParams.set(k, v);
-      url.searchParams.set('client_id', await this.clientId());
+      const clientId = await this.clientId();
+      url.searchParams.set('client_id', clientId);
       const headers = { Accept: 'application/json' };
       // URLs from API responses (transcodings, next_href) are absolute: the session
-      // token is attached only when the request really goes to SoundCloud's API.
-      if (token && url.hostname === API_HOST) headers.Authorization = `OAuth ${token}`;
+      // token goes only to SoundCloud's API itself, over HTTPS, on the default port.
+      if (token && url.protocol === 'https:' && url.hostname === API_HOST && !url.port) headers.Authorization = `OAuth ${token}`;
       const res = await this.fetch(url.href, { headers, signal, credentials: 'omit' });
       if (res.ok) {
+        const data = await res.json();
         if (headers.Authorization) this.authRejected = false;
-        return res.json();
+        markSession(data, !!headers.Authorization);
+        return data;
+      }
+      // A stale client_id also gives 401/403: look it up again (keeping the session) first.
+      if ((res.status === 401 || res.status === 403) && !refreshed) {
+        refreshed = true;
+        await this.refreshClientId(clientId);
+        continue;
       }
       if (res.status === 401 && headers.Authorization) {
         // Expired session: continue anonymously, but remember it so the error
         // message can tell the user to log in again instead of blaming Go+.
         this.authRejected = true;
         token = null;
-        continue;
-      }
-      if ((res.status === 401 || res.status === 403) && !refreshed) {
-        refreshed = true;
-        await this.clientId(true);
         continue;
       }
       if (res.status === 404) throw new ApiError('Не найдено: ссылка неверна, трек удалён или приватный', 404);
@@ -199,12 +236,16 @@ export class SoundCloudApi {
     return this.request('/resolve', { url: target }, opts);
   }
 
-  /** Full track objects for ids, in the given order (missing ones are skipped). */
-  async tracks(ids, opts) {
+  /**
+   * Full track objects for ids, in the given order (missing ones are skipped).
+   * Private tracks of a secret playlist come only with that playlist's context.
+   */
+  async tracks(ids, opts, { playlistId, playlistSecretToken } = {}) {
     const byId = new Map();
-    for (let i = 0; i < ids.length; i += 50) {
-      const chunk = ids.slice(i, i + 50);
-      const list = await this.request('/tracks', { ids: chunk.join(',') }, opts);
+    const valid = ids.filter(isTrackId);
+    for (let i = 0; i < valid.length; i += 50) {
+      const chunk = valid.slice(i, i + 50);
+      const list = await this.request('/tracks', { ids: chunk.join(','), playlistId, playlistSecretToken }, opts);
       for (const t of list) byId.set(t.id, t);
     }
     return ids.map((id) => byId.get(id)).filter(Boolean);
@@ -214,7 +255,8 @@ export class SoundCloudApi {
   async playlistTracks(playlist, opts) {
     const entries = (playlist.tracks || []).map((t) => t.track || t);
     const missing = entries.filter((t) => !t.media).map((t) => t.id);
-    const fetched = missing.length ? await this.tracks(missing, opts) : [];
+    const context = isTrackId(playlist.id) && playlist.secret_token ? { playlistId: playlist.id, playlistSecretToken: playlist.secret_token } : {};
+    const fetched = missing.length ? await this.tracks(missing, opts, context) : [];
     const byId = new Map([...entries.filter((t) => t.media), ...fetched].map((t) => [t.id, t]));
     return entries.map((t) => byId.get(t.id) || { ...t, _unavailable: true });
   }
@@ -234,15 +276,17 @@ export class SoundCloudApi {
 
   async streamUrl(transcoding, track, opts) {
     const res = await this.request(transcoding.url, { track_authorization: track.track_authorization, secret_token: track.secret_token }, opts);
-    if (!res?.url) throw new ApiError('SoundCloud не выдал ссылку на поток');
+    if (!res?.url || !/^https:\/\//.test(res.url)) throw new ApiError('SoundCloud не выдал ссылку на поток');
     return res.url;
   }
 
   /** Uploader's original file. Requires a logged-in session; null when unavailable. */
   async originalDownloadUrl(track, opts) {
+    if (!isTrackId(track.id)) return null;
     try {
-      const res = await this.request(`/tracks/${track.id}/download`, { secret_token: track.secret_token }, opts);
-      return res?.redirectUri || null;
+      // 401/403 here mean "not allowed / limit reached", not a stale client_id.
+      const res = await this.request(`/tracks/${track.id}/download`, { secret_token: track.secret_token }, { ...opts, refresh: false });
+      return /^https:\/\//.test(res?.redirectUri || '') ? res.redirectUri : null;
     } catch (e) {
       if (e.name === 'AbortError') throw e;
       return null;

@@ -44,17 +44,66 @@ test('a track the API serves as a 30-second preview goes through the player', as
   assert.deepEqual(calls, ['player']);
 });
 
+const preview = (extra = {}) => ({ id: 1, media: { transcodings: [hls('aac_160k', { snipped: true })] }, ...extra });
+
 test('a preview served to a working session is Go+: no pointless player run', async () => {
   const { engine, calls } = makeEngine({ token: 'tok' });
-  await assert.rejects(engine.fetchAudio(job({ id: 1, media: { transcodings: [hls('aac_160k', { snipped: true })] } }), item, SETTINGS), /Go\+/);
+  await assert.rejects(engine.fetchAudio(job(preview({ _authed: true })), item, SETTINGS), /Go\+/);
   assert.deepEqual(calls, []);
 });
 
-test('a preview after SoundCloud rejected the session still tries the player', async () => {
+test('retry after logging in: the track is asked again with the session and comes in full', async () => {
+  const { engine, calls } = makeEngine({ token: 'tok' });
+  engine.api.tracks = async () => [{ id: 1, _authed: true, media: { transcodings: [hls('aac_160k')] } }];
+  await engine.fetchAudio(job(preview()), item, SETTINGS);
+  assert.deepEqual(calls, ['api']);
+});
+
+test('asked again with the session and still a preview: Go+', async () => {
+  const { engine, calls } = makeEngine({ token: 'tok' });
+  engine.api.tracks = async () => [preview({ _authed: true })];
+  await assert.rejects(engine.fetchAudio(job(preview()), item, SETTINGS), /Go\+/);
+  assert.deepEqual(calls, []);
+});
+
+test('a preview when SoundCloud rejects the session still tries the player', async () => {
   const { engine, calls } = makeEngine({ token: 'expired' });
-  engine.api.authRejected = true;
-  await engine.fetchAudio(job({ id: 1, media: { transcodings: [hls('aac_160k', { snipped: true })] } }), item, SETTINGS);
+  engine.api.tracks = async () => [preview({ _authed: false })];
+  await engine.fetchAudio(job(preview()), item, SETTINGS);
   assert.deepEqual(calls, ['player']);
+});
+
+test('a preview without any login goes straight to the player', async () => {
+  const { engine, calls } = makeEngine();
+  engine.api.tracks = async () => assert.fail('no session: nothing to ask again');
+  await engine.fetchAudio(job(preview()), item, SETTINGS);
+  assert.deepEqual(calls, ['player']);
+});
+
+test('a track the API did not return in a playlist is tried through the player', async () => {
+  const { engine } = makeEngine();
+  engine.api.resolve = async () => ({ kind: 'playlist', id: 7, title: 'P', permalink_url: 'https://soundcloud.com/a/sets/p', user: { username: 'A' }, tracks: [] });
+  engine.api.playlistTracks = async () => [{ id: 5, _unavailable: true }];
+  const j = { url: 'https://soundcloud.com/a/sets/p', items: [] };
+  await engine.resolveJob(j, new AbortController().signal, { playlistFolderTemplate: '{playlist}', baseFolder: 'SoundCloud' });
+  assert.equal(j.items[0].status, 'queued');
+  assert.equal(j.pageUrl, 'https://soundcloud.com/a/sets/p');
+});
+
+test('the original wins over a DRM-only stream', async () => {
+  const { engine } = makeEngine({ token: 'tok' });
+  engine.api.resolve = async () => ({ kind: 'track', id: 1, title: 'T', downloadable: true, user: { username: 'A' }, media: { transcodings: [hls('aac_160k', { format: { protocol: 'ctr-encrypted-hls', mime_type: 'audio/mp4' } })] } });
+  const j = { url: 'https://soundcloud.com/a/t', items: [] };
+  await engine.resolveJob(j, new AbortController().signal, { ...SETTINGS, baseFolder: 'SoundCloud' });
+  assert.equal(j.items[0].status, 'queued');
+});
+
+test('an original with a non-audio extension is not saved under that extension', async () => {
+  const { engine } = makeEngine({ token: 'tok' });
+  engine.api.originalDownloadUrl = async () => 'data:text/html;base64,PHNjcmlwdD4=';
+  const res = await engine.fetchAudio(job({ id: 1, downloadable: true, media: { transcodings: [hls('aac_160k')] } }), item, SETTINGS);
+  assert.equal(res.quality, 'Оригинал');
+  assert.equal(res.ext, undefined);
 });
 
 test('DRM-only tracks fail without trying either source', async () => {

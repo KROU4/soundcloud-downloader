@@ -30,10 +30,10 @@
     "offscreen"
   ],
   "host_permissions": [
-    "*://soundcloud.com/*",
-    "*://*.soundcloud.com/*",
-    "*://*.sndcdn.com/*",
-    "*://*.soundcloud.cloud/*"
+    "https://soundcloud.com/*",
+    "https://*.soundcloud.com/*",
+    "https://*.sndcdn.com/*",
+    "https://*.soundcloud.cloud/*"
   ],
   "content_scripts": [
     {
@@ -61,9 +61,10 @@
       "run_at": "document_idle"
     }
   ],
-  "minimum_chrome_version": "116",
+  "minimum_chrome_version": "120",
   "background": {
     "service_worker": "background.js",
     "type": "module"
-  }
+  },
+  "incognito": "not_allowed"
 }

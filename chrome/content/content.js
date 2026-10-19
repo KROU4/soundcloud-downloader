@@ -132,6 +132,8 @@
   async function onClick(e) {
     e.preventDefault();
     e.stopPropagation();
+    // Only the user's own clicks: a script on the page must not start downloads.
+    if (!e.isTrusted) return;
     const btn = e.currentTarget;
     const url = urlFor(btn);
     if (!url) return toast('Не удалось определить, что скачивать', true);

@@ -92,7 +92,8 @@ try {
   fs.writeFileSync(path.join(out, 'screenshot-1-page.png'), pageShot);
 
   // 2. Download the playlist and show the popup with the result.
-  await page.$eval('.l-about-top .scdl-btn, .listenEngagement .scdl-btn', (b) => b.click());
+  // A real click: the extension ignores synthetic ones.
+  await page.locator('.l-about-top .scdl-btn, .listenEngagement .scdl-btn').first().click();
   const popup = await ctx.newPage();
   await popup.setViewportSize({ width: 400, height: 560 });
   await popup.goto(`chrome-extension://${extId}/ui/popup.html`);

@@ -12,7 +12,7 @@
     "build": "node tools/build.mjs",
     "check": "node tools/build.mjs --check",
     "test": "node --test \"test/*.test.js\"",
-    "lint:firefox": "npx -y web-ext@8 lint --source-dir firefox",
+    "lint:firefox": "npx -y web-ext@8.10.0 lint --source-dir firefox",
     "smoke": "node tools/smoke.mjs",
     "verify": "npm run check && npm test && npm run lint:firefox"
   }

@@ -198,9 +198,10 @@ async function init() {
   };
   $('clear').onclick = () => engine('clear');
 
-  // Logged in = the site's session cookie: originals, Go+ quality and the player fallback need it.
-  const cookie = await ext.cookies.get({ url: 'https://soundcloud.com/', name: 'oauth_token' }).catch(() => null);
-  $('login-hint').classList.toggle('hidden', !!cookie?.value);
+  // Originals, Go+ quality and the player fallback need a SoundCloud login.
+  engine('session')
+    .then((s) => $('login-hint').classList.toggle('hidden', !!s?.loggedIn))
+    .catch(() => {});
 
   if (scTab) {
     if (/^https:\/\/(m\.|www\.)?soundcloud\.com\/[^/?#]+/.test(scTab.url)) showCurrent(scTab.url, scTab.id);
