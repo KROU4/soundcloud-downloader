@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: firefox/ in sync with chrome/, versions agree
+        run: node tools/build.mjs --check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Lint the Firefox build (addons.mozilla.org rules)
+        run: npx -y web-ext@8.10.0 lint --source-dir firefox --warnings-as-errors
+
+      - name: Build packages
+        run: node tools/build.mjs
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packages
+          path: dist/*.zip
+          retention-days: 14

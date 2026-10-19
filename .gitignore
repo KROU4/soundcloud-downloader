@@ -3,3 +3,6 @@
 .ruff_cache/
 web-ext-artifacts/
 node_modules/
+.omc/
+smoke-out/
+dist/

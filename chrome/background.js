@@ -1,16 +1,18 @@
 // Background: Chromium service worker or Firefox event page (same file).
 //  - Chromium: the engine lives in an offscreen document (needs DOM for blob URLs);
-//    this worker routes commands to it and provides downloads, tabs and storage.
+//    this worker routes commands to it and provides downloads, cookies, tabs and storage.
 //  - Firefox: the background page has a DOM, so the engine runs right here.
 import { BLOB_TYPE, SC_TAB_PATTERNS, call, ext, onMessage } from './lib/browser.js';
+import { isScPageUrl } from './lib/hosts.js';
 import { SETTINGS_KEY } from './lib/settings.js';
 
 const IS_SERVICE_WORKER = typeof ServiceWorkerGlobalScope !== 'undefined' && globalThis instanceof ServiceWorkerGlobalScope;
 
 // ------------------------------------------------------------ platform services
 
-// SoundCloud tabs: the engine takes track data and stream links from the site's own
-// player in one of them (see content/page-hook.js) instead of calling the API.
+// SoundCloud tabs: when the API serves only a preview (or is unreachable), the engine
+// takes track data and stream links from the site's own player in one of them
+// (see content/page-hook.js).
 
 // Hosts our content scripts run on (manifest content_scripts.matches).
 const SC_PAGE = /^https:\/\/(m\.)?soundcloud\.com\//;
@@ -61,6 +63,8 @@ async function pageCall(tabId, op, args, { reload = true } = {}) {
 }
 
 async function navigateTab(tabId, url) {
+  // URLs come from page data too: the tab is only ever sent to soundcloud.com.
+  if (!isScPageUrl(url)) throw new Error('Отказ: переход возможен только на страницы soundcloud.com');
   // Wait for the navigation to start, so the old page does not answer the ping.
   const started = new Promise((resolve) => {
     const timer = setTimeout(done, 5000);
@@ -101,6 +105,35 @@ async function pickTab(preferred) {
     creatingTab = null;
   });
   return creatingTab;
+}
+
+/**
+ * SoundCloud session token (the site keeps it in the `oauth_token` cookie). Without
+ * it the API serves only 30-second previews of many label tracks, so every Firefox
+ * privacy mode has to be covered: first-party isolation makes a plain get() throw,
+ * and containers keep cookies in their own stores.
+ */
+async function getToken() {
+  const query = { url: 'https://soundcloud.com/', name: 'oauth_token' };
+  for (const extra of [{}, { firstPartyDomain: 'soundcloud.com' }]) {
+    try {
+      const cookie = await ext.cookies.get({ ...query, ...extra });
+      if (cookie?.value) return cookie.value;
+    } catch {
+      // try the next variant
+    }
+  }
+  try {
+    const stores = ext.cookies.getAllCookieStores ? await ext.cookies.getAllCookieStores() : [{ id: undefined }];
+    for (const store of stores) {
+      const all = await ext.cookies.getAll({ domain: 'soundcloud.com', name: 'oauth_token', storeId: store.id, firstPartyDomain: null });
+      const found = all.find((c) => c.value);
+      if (found) return found.value;
+    }
+  } catch {
+    // Chromium rejects firstPartyDomain; the plain get() above already covered it
+  }
+  return null;
 }
 
 async function getSettings() {
@@ -212,6 +245,7 @@ if (!IS_SERVICE_WORKER) {
     ({ Engine }) =>
       new Engine({
         getSettings,
+        getToken,
         pageCall,
         pickTab,
         navigate: navigateTab,
@@ -242,22 +276,37 @@ async function engineCall(cmd) {
 
 // ------------------------------------------------------------------ messaging
 
+const EXTENSION_ORIGIN = ext.runtime.getURL('');
+/** Our own pages (popup, options, offscreen), as opposed to content scripts inside web pages. */
+const fromExtensionPage = (sender) => sender.id === ext.runtime.id && (sender.url || '').startsWith(EXTENSION_ORIGIN);
+
 // Popup, options and content scripts talk to the engine through here. A button on
 // a SoundCloud page ties the job to that tab: its player is used for the download.
 onMessage(
   (msg) => msg.to === 'engine',
-  (msg, sender) => engineCall({ ...msg, tabId: msg.tabId ?? sender.tab?.id ?? null }),
+  (msg, sender) => {
+    if (fromExtensionPage(sender)) return engineCall({ ...msg, tabId: msg.tabId ?? null });
+    // Content scripts live inside web pages: they may only queue a download, for their own tab.
+    if (msg.cmd !== 'enqueue' || !sender.tab) throw new Error('Команда недоступна со страницы');
+    return engineCall({ cmd: 'enqueue', url: msg.url, tabId: sender.tab.id });
+  },
 );
 
-// Requests coming from the offscreen document (Chromium only).
+// Requests from the offscreen document (Chromium only; Firefox runs the engine here).
+const OFFSCREEN_URL = ext.runtime.getURL('engine/host.html');
+const OWN_BLOB = `blob:${EXTENSION_ORIGIN.replace(/\/$/, '')}/`;
 onMessage(
-  (msg) => msg.to === 'background',
+  (msg, sender) => IS_SERVICE_WORKER && msg.to === 'background' && sender.id === ext.runtime.id && sender.url === OFFSCREEN_URL,
   async (msg) => {
     switch (msg.op) {
       case 'download':
+        // Only files the engine built itself.
+        if (!String(msg.url).startsWith(OWN_BLOB)) throw new Error('Отказ: можно сохранять только собранные расширением файлы');
         return download(msg.url, msg.filename, { overwrite: !!msg.overwrite });
       case 'findDownload':
         return findDownload(msg.url);
+      case 'getToken':
+        return getToken();
       case 'pageCall':
         return pageCall(msg.tabId, msg.pageOp, msg.args, msg.opts);
       case 'pickTab':

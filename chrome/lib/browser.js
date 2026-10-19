@@ -35,7 +35,7 @@ export async function call(msg, { retries = 0 } = {}) {
   }
 }
 
-export const SC_TAB_PATTERNS = ['*://soundcloud.com/*', '*://*.soundcloud.com/*'];
+export const SC_TAB_PATTERNS = ['https://soundcloud.com/*', 'https://*.soundcloud.com/*'];
 
 /**
  * Type for blobs handed to downloads.download. A real media type makes Chromium

@@ -143,6 +143,11 @@ async function showCurrent(url, tabId) {
     const meta = [];
     if (info.artist && info.kind !== 'user') meta.push(info.artist);
     if (info.kind !== 'track' && info.count) meta.push(`${info.count} ${plural(info.count, 'трек', 'трека', 'треков')}`);
+    if (info.kind === 'track' && !info.problem) {
+      if (info.original && info.loggedIn) meta.push('Оригинальный файл');
+      else if (info.viaPlayer) meta.push('Полная версия — через плеер сайта');
+      else if (info.quality) meta.push(info.quality);
+    }
     $('cur-meta').textContent = meta.join(' · ');
     if (info.problem) {
       $('cur-problem').textContent = `${info.problem}. Потоки: ${info.streams}`;
@@ -172,8 +177,9 @@ async function init() {
     return;
   }
 
-  ext.runtime.onMessage.addListener((msg) => {
-    if (msg?.to === 'ui' && msg.type === 'state') render(msg.state);
+  ext.runtime.onMessage.addListener((msg, sender) => {
+    // State comes from the background; content scripts could send look-alike messages.
+    if (msg?.to === 'ui' && msg.type === 'state' && sender?.id === ext.runtime.id && !sender.tab) render(msg.state);
   });
 
   const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
@@ -193,12 +199,12 @@ async function init() {
   };
   $('clear').onclick = () => engine('clear');
 
+  // Originals, Go+ quality and the player fallback need a SoundCloud login.
+  engine('session')
+    .then((s) => $('login-hint').classList.toggle('hidden', !!s?.loggedIn))
+    .catch(() => {});
+
   if (scTab) {
-    // The site's player needs a logged-in session; the page itself knows whether there is one.
-    ext.tabs
-      .sendMessage(scTab.id, { to: 'page', op: 'ping' })
-      .then((res) => $('login-hint').classList.toggle('hidden', !res?.ok || res.result?.loggedIn !== false))
-      .catch(() => {});
     if (/^https:\/\/(m\.|www\.)?soundcloud\.com\/[^/?#]+/.test(scTab.url)) showCurrent(scTab.url, scTab.id);
   }
 
