@@ -215,6 +215,8 @@ export class SoundCloudApi {
       // Endpoints like /download answer 401/403 for "not allowed": no retries there.
       if (!refresh) throw new ApiError(`Ошибка API SoundCloud: HTTP ${res.status}`, res.status);
       if (res.status === 401 && headers.Authorization) {
+        // Another request replaced the stale client_id meanwhile: retry with the session.
+        if (this._clientId && this._clientId !== clientId) continue;
         // Expired session: continue anonymously, but remember it so the error
         // message can tell the user to log in again instead of blaming Go+.
         this.authRejected = true;

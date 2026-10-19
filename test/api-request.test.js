@@ -71,3 +71,18 @@ test('private playlist tracks are asked with the playlist context', async () => 
   assert.equal(url.searchParams.get('playlistId'), '9');
   assert.equal(url.searchParams.get('playlistSecretToken'), 's-abc');
 });
+
+test('a 401 after another request already replaced the client_id retries with the session', async () => {
+  const { api, log } = scripted([{ status: 401 }, { status: 200, body: { kind: 'track', id: 1, media: { transcodings: [] } } }]);
+  await api.clientId();
+  const origFetch = api.fetch;
+  api.fetch = async (url, init) => {
+    const res = await origFetch(url, init);
+    api._clientId = 'c'.repeat(32); // replaced by a parallel request
+    return res;
+  };
+  const res = await api.request('/resolve', { url: 'x' });
+  assert.deepEqual(log.map((l) => l.auth), [true, true]);
+  assert.equal(api.authRejected, false);
+  assert.equal(res._authed, true);
+});

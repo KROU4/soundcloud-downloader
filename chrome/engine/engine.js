@@ -567,11 +567,15 @@ export class Engine {
     // Fetched without a working session (anonymously, or before the user logged in):
     // ask again with the current one, it may get the full track.
     if ((plan.source === 'player' || track._unavailable) && token && !track._authed) {
-      const [fresh] = await this.api.tracks([track.id], { signal }, job.playlistContext || {}).catch((e) => {
+      const again = await this.api.tracks([track.id], { signal }, job.playlistContext || {}).catch((e) => {
         if (isAbort(e)) throw e;
         return [];
       });
-      if (fresh) {
+      const [fresh] = again;
+      if (!fresh && again.authed && track._unavailable) {
+        // Not returned to a working session either: the track is really gone.
+        track = job.tracks[item.index] = { ...track, _authed: true };
+      } else if (fresh) {
         track = job.tracks[item.index] = { ...track, ...fresh, _unavailable: false };
         Object.assign(item, itemLabels(track));
         plan = streamPlan(track);

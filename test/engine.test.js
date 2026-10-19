@@ -185,3 +185,10 @@ test('API-resolved tracks with only a preview stay queued (the player will get t
   assert.equal(j.source, 'api');
   assert.equal(j.items[0].status, 'queued');
 });
+
+test('a stub asked again with a working session and still missing is unavailable, no player run', async () => {
+  const { engine, calls } = makeEngine({ token: 'tok' });
+  engine.api.tracks = async () => Object.assign([], { authed: true });
+  await assert.rejects(engine.fetchAudio({ ...job({ id: 1, _unavailable: true, _authed: false }), pageUrl: 'https://soundcloud.com/a/sets/p' }, item, SETTINGS), /недоступен/);
+  assert.deepEqual(calls, []);
+});
