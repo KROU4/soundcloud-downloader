@@ -42,7 +42,9 @@ const engine = new Engine({
   },
 });
 
+// Content scripts' messages reach this document too: only the service worker (no tab)
+// may drive the engine; it has already checked what a page is allowed to ask for.
 onMessage(
-  (msg) => msg.to === 'offscreen',
+  (msg, sender) => msg.to === 'offscreen' && sender.id === chrome.runtime.id && !sender.tab,
   (msg) => engine.handle(msg),
 );

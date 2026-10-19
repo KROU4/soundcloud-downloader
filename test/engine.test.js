@@ -90,6 +90,18 @@ test('a track the API did not return in a playlist is tried through the player',
   assert.equal(j.pageUrl, 'https://soundcloud.com/a/sets/p');
 });
 
+test('a playlist track the API dropped for a working session is unavailable, no player run', async () => {
+  const { engine, calls } = makeEngine({ token: 'tok' });
+  await assert.rejects(engine.fetchAudio({ ...job({ id: 1, _unavailable: true, _authed: true }), pageUrl: 'https://soundcloud.com/a/sets/p' }, item, SETTINGS), /недоступен/);
+  assert.deepEqual(calls, []);
+});
+
+test('a playlist track missing from an anonymous answer is tried through the player', async () => {
+  const { engine, calls } = makeEngine();
+  await engine.fetchAudio({ ...job({ id: 1, _unavailable: true, _authed: false }), pageUrl: 'https://soundcloud.com/a/sets/p' }, item, SETTINGS);
+  assert.deepEqual(calls, ['player']);
+});
+
 test('the original wins over a DRM-only stream', async () => {
   const { engine } = makeEngine({ token: 'tok' });
   engine.api.resolve = async () => ({ kind: 'track', id: 1, title: 'T', downloadable: true, user: { username: 'A' }, media: { transcodings: [hls('aac_160k', { format: { protocol: 'ctr-encrypted-hls', mime_type: 'audio/mp4' } })] } });

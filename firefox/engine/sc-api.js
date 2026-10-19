@@ -143,6 +143,8 @@ export class SoundCloudApi {
     this._clientId = null;
     /** Set when SoundCloud answered 401 to our session token (we then went on anonymously). */
     this.authRejected = false;
+    /** Response → whether it was served to the session (for lists that may come back empty). */
+    this.authedResponses = new WeakMap();
   }
 
   async clientId() {
@@ -190,7 +192,8 @@ export class SoundCloudApi {
    * endpoints where those statuses are expected answers, like /download).
    */
   async request(pathOrUrl, params = {}, { signal, auth = true, refresh = true } = {}) {
-    let token = auth ? await this.getToken() : null;
+    const session = auth ? await this.getToken() : null;
+    let token = session;
     let refreshed = !refresh;
     for (;;) {
       const url = new URL(pathOrUrl.startsWith('http') ? pathOrUrl : API + pathOrUrl);
@@ -206,19 +209,23 @@ export class SoundCloudApi {
         const data = await res.json();
         if (headers.Authorization) this.authRejected = false;
         markSession(data, !!headers.Authorization);
+        if (data && typeof data === 'object') this.authedResponses.set(data, !!headers.Authorization);
         return data;
       }
-      // A stale client_id also gives 401/403: look it up again (keeping the session) first.
-      if ((res.status === 401 || res.status === 403) && !refreshed) {
-        refreshed = true;
-        await this.refreshClientId(clientId);
-        continue;
-      }
+      // Endpoints like /download answer 401/403 for "not allowed": no retries there.
+      if (!refresh) throw new ApiError(`Ошибка API SoundCloud: HTTP ${res.status}`, res.status);
       if (res.status === 401 && headers.Authorization) {
         // Expired session: continue anonymously, but remember it so the error
         // message can tell the user to log in again instead of blaming Go+.
         this.authRejected = true;
         token = null;
+        continue;
+      }
+      // Refused anonymously too: the client_id is stale. Look it up again, with the session back.
+      if ((res.status === 401 || res.status === 403) && !refreshed) {
+        refreshed = true;
+        await this.refreshClientId(clientId);
+        token = session;
         continue;
       }
       if (res.status === 404) throw new ApiError('Не найдено: ссылка неверна, трек удалён или приватный', 404);
@@ -242,13 +249,18 @@ export class SoundCloudApi {
    */
   async tracks(ids, opts, { playlistId, playlistSecretToken } = {}) {
     const byId = new Map();
+    let authed = true;
     const valid = ids.filter(isTrackId);
     for (let i = 0; i < valid.length; i += 50) {
       const chunk = valid.slice(i, i + 50);
       const list = await this.request('/tracks', { ids: chunk.join(','), playlistId, playlistSecretToken }, opts);
+      authed &&= this.authedResponses.get(list) === true;
       for (const t of list) byId.set(t.id, t);
     }
-    return ids.map((id) => byId.get(id)).filter(Boolean);
+    const result = ids.map((id) => byId.get(id)).filter(Boolean);
+    /** Whether every request went with a session SoundCloud accepted. */
+    result.authed = valid.length > 0 && authed;
+    return result;
   }
 
   /** Playlists only embed the first few tracks in full; fetch the rest. */
@@ -258,7 +270,9 @@ export class SoundCloudApi {
     const context = isTrackId(playlist.id) && playlist.secret_token ? { playlistId: playlist.id, playlistSecretToken: playlist.secret_token } : {};
     const fetched = missing.length ? await this.tracks(missing, opts, context) : [];
     const byId = new Map([...entries.filter((t) => t.media), ...fetched].map((t) => [t.id, t]));
-    return entries.map((t) => byId.get(t.id) || { ...t, _unavailable: true });
+    // A track missing from an answer to a working session is really gone; one missing
+    // from an anonymous answer may still play for the logged-in user.
+    return entries.map((t) => byId.get(t.id) || { ...t, _unavailable: true, _authed: !!fetched.authed });
   }
 
   async userTracks(user, opts) {

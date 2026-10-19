@@ -177,8 +177,9 @@ async function init() {
     return;
   }
 
-  ext.runtime.onMessage.addListener((msg) => {
-    if (msg?.to === 'ui' && msg.type === 'state') render(msg.state);
+  ext.runtime.onMessage.addListener((msg, sender) => {
+    // State comes from the background; content scripts could send look-alike messages.
+    if (msg?.to === 'ui' && msg.type === 'state' && sender?.id === ext.runtime.id && !sender.tab) render(msg.state);
   });
 
   const [tab] = await ext.tabs.query({ active: true, currentWindow: true });

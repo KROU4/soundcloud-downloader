@@ -117,6 +117,7 @@ function rememberCover(cache, url, bytes) {
 let jobSeq = 0;
 
 /** Extensions an uploader's original may keep; anything else is saved as .bin. */
+const UNAVAILABLE = 'Трек недоступен (удалён, приватный или заблокирован в регионе)';
 const AUDIO_EXT = new Set(['mp3', 'm4a', 'aac', 'mp4', 'flac', 'wav', 'aif', 'aiff', 'ogg', 'oga', 'opus', 'wma', 'amr', 'mp2', 'alac', 'ape', 'wv']);
 /** Larger downloads are refused (a 2-hour WAV is ~1.3 GB). */
 const MAX_FILE_BYTES = 2 * 1024 ** 3;
@@ -481,8 +482,8 @@ export class Engine {
       let problem = null;
       if (job.source === 'page') problem = trackProblem(t);
       else if (t._unavailable) {
-        // The API did not give this track; the playlist page in the browser may still play it.
-        problem = job.pageUrl ? null : 'Трек недоступен (удалён, приватный или заблокирован в регионе)';
+        // Missing from an anonymous answer: the playlist page may still play it for the user.
+        problem = job.pageUrl && !t._authed ? null : UNAVAILABLE;
       } else if (!canOriginal(t, settings, token)) {
         const plan = streamPlan(t);
         if (plan.source === 'error') problem = `${plan.reason}. Потоки: ${describeStreams(t)}`;
@@ -582,6 +583,13 @@ export class Engine {
     if (plan.source === 'player' && track._authed) {
       throw new Error(`${unavailableReason(track, { loggedIn: true })}. Потоки: ${describeStreams(track)}`);
     }
+    if (track._unavailable) {
+      if (track._authed) throw new Error(UNAVAILABLE);
+      return this.fetchViaPlayer(job, item, signal, onProgress).catch((e) => {
+        if (isAbort(e) || signal?.aborted) throw e;
+        throw new Error(`${UNAVAILABLE} (через плеер тоже не вышло: ${e.message})`);
+      });
+    }
     if (plan.source !== 'api') return this.fetchViaPlayer(job, item, signal, onProgress);
     try {
       return await this.fetchViaApi(track, settings, signal, onProgress);
@@ -624,11 +632,9 @@ export class Engine {
     // A playlist/profile keeps its list page in the tab while its tracks go through the
     // player. An API job holds the tab only while it uses the player, then lets others in.
     const holdsList = !!job.pageUrl;
-    if (holdsList) {
-      job.playerUsers = (job.playerUsers || 0) + 1;
-      await this.source.claim(job, signal);
-    }
+    if (holdsList) job.playerUsers = (job.playerUsers || 0) + 1;
     try {
+      if (holdsList) await this.source.claim(job, signal);
       for (let attempt = 0; ; attempt++) {
         const index = job.context.type === 'single' ? null : item.index;
         const grab = await this.source.grab(job, job.tracks[item.index], { index, fresh: attempt > 0, signal });
@@ -674,7 +680,8 @@ export class Engine {
 
   async fetchCover(job, candidates, signal) {
     const cache = job.coverCache || new Map();
-    for (const url of candidates) {
+    // Page data may carry any URL: artwork comes only from SoundCloud's CDN.
+    for (const url of candidates.filter(isScMediaUrl)) {
       if (cache.has(url)) {
         const cached = cache.get(url);
         if (cached) return cached;
@@ -758,8 +765,15 @@ export class Engine {
     try {
       // Files sit in the archive root: unpacking it gives the tracks, not a folder with them.
       const chunks = buildZip(entries.map((e) => ({ name: e.name, data: e.data })));
-      // The name comes from the playlist title: a same-named file of the user is kept (uniquify).
-      job.archives.push(await this.platform.saveFile(chunks, buildPath(zip.baseFolder, name, 'zip')));
+      // The name comes from the playlist title: a same-named file of the user is kept
+      // (uniquify). A retry replaces the archive this job saved before, under its final name.
+      const requested = buildPath(zip.baseFolder, name, 'zip');
+      job.zipSaved ??= new Map();
+      const previous = job.zipSaved.get(requested);
+      const saved = await this.platform.saveFile(chunks, previous || requested, { overwrite: !!previous });
+      const finalName = String(saved || '').split(/[\\/]/).pop();
+      if (finalName) job.zipSaved.set(requested, requested.replace(/[^/]+$/, finalName));
+      job.archives.push(saved);
     } catch (e) {
       if (isAbort(e)) throw e;
       for (const { item } of entries) if (item) Object.assign(item, { status: 'error', error: `Не удалось сохранить ZIP: ${e.message}` });
@@ -823,7 +837,7 @@ async function fetchFile(url, { signal, onProgress } = {}) {
   const res = await fetchWithRetry(url, { signal });
   const name = responseFileName(res);
   const total = Number(res.headers.get('content-length')) || 0;
-  if (total > MAX_FILE_BYTES) throw Object.assign(new Error('Файл больше 2 ГБ, такие не скачиваются'), { fatal: true });
+  if (total > MAX_FILE_BYTES) throw new Error('Файл больше 2 ГБ, такие не скачиваются');
   if (!res.body) return { bytes: new Uint8Array(await res.arrayBuffer()), name };
   const reader = res.body.getReader();
   const chunks = [];
@@ -835,7 +849,7 @@ async function fetchFile(url, { signal, onProgress } = {}) {
     received += value.length;
     if (received > MAX_FILE_BYTES) {
       await reader.cancel().catch(() => {});
-      throw Object.assign(new Error('Файл больше 2 ГБ, такие не скачиваются'), { fatal: true });
+      throw new Error('Файл больше 2 ГБ, такие не скачиваются');
     }
     if (onProgress && total) onProgress(received / total);
   }
