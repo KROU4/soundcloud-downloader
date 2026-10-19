@@ -14,9 +14,27 @@
       <form id="form">
         <fieldset>
           <legend>Качество</legend>
+          <label class="check">
+            <input type="checkbox" name="preferOriginal" />
+            <span>
+              Скачивать оригинальный файл, если автор разрешил скачивание
+              <small>Нужен вход на soundcloud.com. Обычно это WAV, FLAC или MP3 320 — лучше любого потока.</small>
+            </span>
+          </label>
+          <label class="field">
+            <span>Предпочтительный кодек потока</span>
+            <select name="preferredCodec">
+              <option value="best">Лучший доступный (рекомендуется)</option>
+              <option value="aac">AAC (.m4a)</option>
+              <option value="mp3">MP3</option>
+              <option value="opus">Opus</option>
+            </select>
+            <small>Если выбранного кодека нет, берётся лучший из доступных.</small>
+          </label>
           <p class="note">
-            Расширение не обращается к API SoundCloud: трек сохраняется из того потока, который получает плеер сайта, в его
-            качестве (обычно AAC 160 kbps, с Go+ — до 256 kbps). Для этого нужен вход на soundcloud.com в этом браузере.
+            Треки скачиваются через API SoundCloud в лучшем доступном качестве. Если API отдаёт трек только как
+            30-секундное превью или недоступен, трек берётся из плеера сайта на открытой вкладке SoundCloud (нужен вход).
+            Треки с DRM сохранить нельзя.
           </p>
         </fieldset>
 

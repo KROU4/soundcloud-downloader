@@ -143,6 +143,11 @@ async function showCurrent(url, tabId) {
     const meta = [];
     if (info.artist && info.kind !== 'user') meta.push(info.artist);
     if (info.kind !== 'track' && info.count) meta.push(`${info.count} ${plural(info.count, 'трек', 'трека', 'треков')}`);
+    if (info.kind === 'track' && !info.problem) {
+      if (info.original && info.loggedIn) meta.push('Оригинальный файл');
+      else if (info.viaPlayer) meta.push('Полная версия — через плеер сайта');
+      else if (info.quality) meta.push(info.quality);
+    }
     $('cur-meta').textContent = meta.join(' · ');
     if (info.problem) {
       $('cur-problem').textContent = `${info.problem}. Потоки: ${info.streams}`;
@@ -193,12 +198,11 @@ async function init() {
   };
   $('clear').onclick = () => engine('clear');
 
+  // Logged in = the site's session cookie: originals, Go+ quality and the player fallback need it.
+  const cookie = await ext.cookies.get({ url: 'https://soundcloud.com/', name: 'oauth_token' }).catch(() => null);
+  $('login-hint').classList.toggle('hidden', !!cookie?.value);
+
   if (scTab) {
-    // The site's player needs a logged-in session; the page itself knows whether there is one.
-    ext.tabs
-      .sendMessage(scTab.id, { to: 'page', op: 'ping' })
-      .then((res) => $('login-hint').classList.toggle('hidden', !res?.ok || res.result?.loggedIn !== false))
-      .catch(() => {});
     if (/^https:\/\/(m\.|www\.)?soundcloud\.com\/[^/?#]+/.test(scTab.url)) showCurrent(scTab.url, scTab.id);
   }
 

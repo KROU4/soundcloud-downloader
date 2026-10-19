@@ -1,6 +1,6 @@
 // Background: Chromium service worker or Firefox event page (same file).
 //  - Chromium: the engine lives in an offscreen document (needs DOM for blob URLs);
-//    this worker routes commands to it and provides downloads, tabs and storage.
+//    this worker routes commands to it and provides downloads, cookies, tabs and storage.
 //  - Firefox: the background page has a DOM, so the engine runs right here.
 import { BLOB_TYPE, SC_TAB_PATTERNS, call, ext, onMessage } from './lib/browser.js';
 import { SETTINGS_KEY } from './lib/settings.js';
@@ -9,8 +9,9 @@ const IS_SERVICE_WORKER = typeof ServiceWorkerGlobalScope !== 'undefined' && glo
 
 // ------------------------------------------------------------ platform services
 
-// SoundCloud tabs: the engine takes track data and stream links from the site's own
-// player in one of them (see content/page-hook.js) instead of calling the API.
+// SoundCloud tabs: when the API serves only a preview (or is unreachable), the engine
+// takes track data and stream links from the site's own player in one of them
+// (see content/page-hook.js).
 
 // Hosts our content scripts run on (manifest content_scripts.matches).
 const SC_PAGE = /^https:\/\/(m\.)?soundcloud\.com\//;
@@ -101,6 +102,35 @@ async function pickTab(preferred) {
     creatingTab = null;
   });
   return creatingTab;
+}
+
+/**
+ * SoundCloud session token (the site keeps it in the `oauth_token` cookie). Without
+ * it the API serves only 30-second previews of many label tracks, so every Firefox
+ * privacy mode has to be covered: first-party isolation makes a plain get() throw,
+ * and containers keep cookies in their own stores.
+ */
+async function getToken() {
+  const query = { url: 'https://soundcloud.com/', name: 'oauth_token' };
+  for (const extra of [{}, { firstPartyDomain: 'soundcloud.com' }]) {
+    try {
+      const cookie = await ext.cookies.get({ ...query, ...extra });
+      if (cookie?.value) return cookie.value;
+    } catch {
+      // try the next variant
+    }
+  }
+  try {
+    const stores = ext.cookies.getAllCookieStores ? await ext.cookies.getAllCookieStores() : [{ id: undefined }];
+    for (const store of stores) {
+      const all = await ext.cookies.getAll({ domain: 'soundcloud.com', name: 'oauth_token', storeId: store.id, firstPartyDomain: null });
+      const found = all.find((c) => c.value);
+      if (found) return found.value;
+    }
+  } catch {
+    // Chromium rejects firstPartyDomain; the plain get() above already covered it
+  }
+  return null;
 }
 
 async function getSettings() {
@@ -212,6 +242,7 @@ if (!IS_SERVICE_WORKER) {
     ({ Engine }) =>
       new Engine({
         getSettings,
+        getToken,
         pageCall,
         pickTab,
         navigate: navigateTab,
@@ -258,6 +289,8 @@ onMessage(
         return download(msg.url, msg.filename, { overwrite: !!msg.overwrite });
       case 'findDownload':
         return findDownload(msg.url);
+      case 'getToken':
+        return getToken();
       case 'pageCall':
         return pageCall(msg.tabId, msg.pageOp, msg.args, msg.opts);
       case 'pickTab':

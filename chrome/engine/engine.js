@@ -1,5 +1,9 @@
 // Download engine. Runs in a DOM context: the offscreen document in Chromium,
 // the background page in Firefox. All browser specifics live in `platform`.
+//
+// Sources, per track: SoundCloud's API first (original file or the best full stream);
+// the site's own player on an open soundcloud.com tab when the API serves only a
+// 30-second preview or fails. Links the API cannot resolve fall back to the page too.
 import { concat, utf8 } from '../lib/bytes.js';
 import { buildPath, renderTemplate } from '../lib/filename.js';
 import { imageInfo } from '../lib/image.js';
@@ -9,7 +13,8 @@ import { withDefaults } from '../lib/settings.js';
 import { writeTags } from '../lib/tags/index.js';
 import { defragment } from '../lib/tags/mp4.js';
 import { buildZip } from '../lib/zip.js';
-import { PageSource, cleanUrl, describeStreams, isSoundCloudPage, qualityLabel, trackProblem } from './page-source.js';
+import { PageSource, isSoundCloudPage, qualityLabel, trackProblem } from './page-source.js';
+import { SoundCloudApi, cleanUrl, describeStreams, rankTranscodings, streamPlan, unavailableReason } from './sc-api.js';
 
 const ACTIVE = new Set(['resolving', 'queued', 'downloading']);
 const SEGMENT_CONCURRENCY = 6;
@@ -20,6 +25,7 @@ const ZIP_PART_BYTES = 512 * 1024 * 1024;
 /**
  * @typedef {object} Platform
  * @property {() => Promise<object>} getSettings
+ * @property {() => Promise<string|null>} getToken  SoundCloud oauth_token cookie
  * @property {(tabId: number, op: string, args?: object) => Promise<any>} pageCall  request to page-hook.js in a soundcloud.com tab
  * @property {(preferred?: number|null) => Promise<number>} pickTab  a usable soundcloud.com tab (opens one if needed)
  * @property {(tabId: number, url: string) => Promise<void>} navigate  loads a URL in the tab and waits until the page is ready
@@ -118,6 +124,7 @@ export class Engine {
   /** @param {Platform} platform */
   constructor(platform) {
     this.platform = platform;
+    this.api = new SoundCloudApi({ getToken: platform.getToken, cacheGet: platform.cacheGet, cacheSet: platform.cacheSet });
     this.source = new PageSource(platform);
     this.jobs = [];
     this.controllers = new Map();
@@ -255,14 +262,48 @@ export class Engine {
     job.runPromise = previous.then(() => (job.status === 'cancelled' ? undefined : this.run(job, { resume })));
   }
 
-  /** Short description of what the open tab shows, for the popup (no downloading, no navigation). */
+  /** Short description of a URL for the popup (no downloading, never navigates a tab). */
   async inspect(rawUrl, tabId) {
+    try {
+      return await this.inspectViaApi(rawUrl);
+    } catch (e) {
+      if (tabId == null) throw e;
+      // The API is unreachable: describe what the open tab shows instead.
+      return this.inspectViaPage(rawUrl, tabId);
+    }
+  }
+
+  async inspectViaApi(rawUrl) {
+    const res = await this.api.resolve(rawUrl);
+    const token = await this.platform.getToken();
+    const info = { kind: res.kind, title: res.title || res.username, artist: res.user?.username, artwork: res.artwork_url || res.avatar_url, loggedIn: !!token };
+    if (res.kind === 'track') {
+      const best = rankTranscodings(res.media?.transcodings)[0];
+      const plan = streamPlan(res);
+      info.quality = best ? `${best.codec.toUpperCase()} ${best.kbps} kbps` : null;
+      info.original = !!(res.downloadable && res.has_downloads_left !== false);
+      // Same rule as fetchAudio: a preview to a working session is Go+, the player cannot help.
+      const goPlus = plan.source === 'player' && !!token && !this.api.authRejected;
+      info.viaPlayer = plan.source === 'player' && !goPlus;
+      info.problem = plan.source === 'error' ? plan.reason : goPlus ? unavailableReason(res, { loggedIn: true }) : null;
+      info.streams = describeStreams(res);
+      info.count = 1;
+    } else if (res.kind === 'playlist' || res.kind === 'system-playlist') {
+      info.count = res.track_count ?? res.tracks?.length;
+      info.isAlbum = !!res.is_album;
+    } else if (res.kind === 'user') {
+      info.count = res.track_count;
+    }
+    return info;
+  }
+
+  async inspectViaPage(rawUrl, tabId) {
     const job = { tabId, url: cleanUrl(rawUrl) };
     // Looking only: the popup must never reload or navigate the user's tab.
     const res = await this.source.peek(job, job.url, { reload: false });
     if (!res?.data) throw new Error('Страница ещё не загрузилась');
     const d = res.data;
-    const info = { kind: res.kind, title: d.title || d.username, artist: d.user?.username, artwork: d.artwork_url || d.avatar_url };
+    const info = { kind: res.kind, title: d.title || d.username, artist: d.user?.username, artwork: d.artwork_url || d.avatar_url, viaPlayer: true };
     if (res.kind === 'track') {
       info.problem = trackProblem(d);
       info.streams = describeStreams(d);
@@ -294,7 +335,8 @@ export class Engine {
         if (isShortLink(job.url)) job.url = await expandShortLink(job.url, signal);
         await this.resolveJob(job, signal, settings);
         job.zipMode = job.context.type !== 'single' && settings.playlistAsZip;
-      } else if (job.pageUrl) {
+      } else if (job.source === 'page' && job.pageUrl) {
+        // A page-based job needs its list page again (API jobs claim a tab only when a track needs the player).
         await this.source.claim(job, signal);
       }
       if (signal.aborted) return;
@@ -326,6 +368,7 @@ export class Engine {
     } finally {
       if (this.controllers.get(job.id) === controller) this.controllers.delete(job.id);
       this.source.release(job);
+      job.leased = false;
       if (job.runId === runId) {
         job.coverCache = null;
         job.zip = null; // drop collected audio of a cancelled/failed run
@@ -335,8 +378,42 @@ export class Engine {
     }
   }
 
+  /** Track, playlist or profile from the API, in the shape PageSource.resolve returns. */
+  async resolveViaApi(job, signal) {
+    const res = await this.api.resolve(job.url, { signal });
+    if (res.kind === 'track') return { kind: 'track', data: res };
+    if (res.kind === 'playlist' || res.kind === 'system-playlist') {
+      const tracks = await this.api.playlistTracks(res, { signal });
+      // The page whose list holds the play buttons, should a track need the player.
+      // A private playlist opens only by its secret link.
+      job.pageUrl = /\/sets\/[^/]+\/s-[^/]+$/.test(new URL(job.url).pathname) ? job.url : res.permalink_url || job.url;
+      return { kind: res.kind, data: { ...res, tracks } };
+    }
+    if (res.kind === 'user') {
+      const tracks = await this.api.userTracks(res, { signal });
+      job.pageUrl = `${cleanUrl(res.permalink_url || job.url)}/tracks`;
+      return { kind: 'user', data: res, tracks };
+    }
+    throw new Error('Эта ссылка не ведёт на трек, плейлист, альбом или профиль');
+  }
+
   async resolveJob(job, signal, settings) {
-    const res = await this.source.resolve(job, job.url, { signal });
+    let res;
+    try {
+      res = await this.resolveViaApi(job, signal);
+      job.source = 'api';
+    } catch (apiError) {
+      if (isAbort(apiError) || signal.aborted) throw apiError;
+      // The API is unreachable or does not know the link: the page may still show it.
+      job.pageUrl = null;
+      try {
+        res = await this.source.resolve(job, job.url, { signal });
+        job.source = 'page';
+      } catch (pageError) {
+        if (isAbort(pageError) || signal.aborted) throw pageError;
+        throw new Error(`${apiError.message} (через страницу тоже не вышло: ${pageError.message})`);
+      }
+    }
     const d = res.data;
     job.kind = res.kind;
     let tracks;
@@ -363,7 +440,14 @@ export class Engine {
     if (!tracks.length) throw new Error('Здесь нет треков');
     job.tracks = tracks;
     job.items = tracks.map((t, index) => {
-      const problem = trackProblem(t);
+      const plan = job.source === 'api' ? streamPlan(t) : null;
+      const problem = t._unavailable
+        ? 'Трек недоступен (удалён, приватный или заблокирован в регионе)'
+        : job.source === 'api'
+          ? plan.source === 'error'
+            ? `${plan.reason}. Потоки: ${describeStreams(t)}`
+            : null
+          : trackProblem(t);
       return { id: t.id, index, ...itemLabels(t), status: problem ? 'error' : 'queued', error: problem, progress: 0 };
     });
   }
@@ -380,9 +464,9 @@ export class Engine {
         item.progress = Math.min(0.95, p * 0.95);
         this.emit();
       };
-      const audio = await this.fetchAudio(job, item, signal, onProgress);
+      const audio = await this.fetchAudio(job, item, settings, signal, onProgress);
       item.quality = audio.quality;
-      // The player loads full track data before playing: tags come from it.
+      // The player may have loaded fuller track data: tags come from the latest copy.
       const track = job.tracks[item.index];
 
       const meta = buildMeta(track, { ...ctx, settings });
@@ -416,8 +500,80 @@ export class Engine {
     }
   }
 
+  /**
+   * Original file if allowed, else the best full stream from the API; the site's player
+   * when the API offers only a preview or the API path fails.
+   */
+  async fetchAudio(job, item, settings, signal, onProgress) {
+    if (job.source === 'page') return this.fetchViaPlayer(job, item, signal, onProgress);
+    const track = job.tracks[item.index];
+    if (settings.preferOriginal && track.downloadable && track.has_downloads_left !== false && (await this.platform.getToken())) {
+      const url = await this.api.originalDownloadUrl(track, { signal });
+      if (url) {
+        try {
+          const { bytes, name } = await this.downloads.run(() => fetchFile(url, { signal, onProgress }));
+          // Extension from the server's file name: covers formats we cannot sniff (WMA, AMR…).
+          return { bytes, quality: 'Оригинал', ext: name.match(/\.([a-z0-9]{2,5})$/i)?.[1].toLowerCase() };
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          // fall back to streaming
+        }
+      }
+    }
+    const plan = streamPlan(track);
+    if (plan.source === 'error') throw new Error(`${plan.reason}. Потоки: ${describeStreams(track)}`);
+    if (plan.source !== 'api') {
+      // The player streams with the same session the API used: if SoundCloud accepted
+      // that session and still served a preview (Go+ track), the player gets the
+      // preview too. It helps only when the API went without a working session.
+      if ((await this.platform.getToken()) && !this.api.authRejected) {
+        throw new Error(`${unavailableReason(track, { loggedIn: true })}. Потоки: ${describeStreams(track)}`);
+      }
+      return this.fetchViaPlayer(job, item, signal, onProgress);
+    }
+    try {
+      return await this.fetchViaApi(track, settings, signal, onProgress);
+    } catch (apiError) {
+      if (isAbort(apiError) || signal?.aborted) throw apiError;
+      try {
+        return await this.fetchViaPlayer(job, item, signal, onProgress);
+      } catch (playerError) {
+        if (isAbort(playerError) || signal?.aborted) throw playerError;
+        throw new Error(`${apiError.message} (через плеер тоже не вышло: ${playerError.message})`);
+      }
+    }
+  }
+
+  async fetchViaApi(track, settings, signal, onProgress) {
+    const ranked = rankTranscodings(track.media?.transcodings, settings.preferredCodec);
+    if (!ranked.length) {
+      const reason = unavailableReason(track, { loggedIn: !!(await this.platform.getToken()), authRejected: this.api.authRejected });
+      throw new Error(`${reason}. Потоки: ${describeStreams(track)}`);
+    }
+    let lastError;
+    for (const { t, codec, kbps } of ranked) {
+      try {
+        const streamUrl = await this.api.streamUrl(t, track, { signal });
+        const quality = `${codec.toUpperCase()} ${kbps} kbps`;
+        return await this.downloads.run(async () => {
+          if (t.format.protocol === 'progressive') return { bytes: await fetchBytes(streamUrl, { signal, onProgress }), quality };
+          return { bytes: await this.fetchHls(streamUrl, signal, onProgress), quality };
+        });
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        lastError = e;
+      }
+    }
+    throw lastError;
+  }
+
   /** The stream the site's player received for this track; a stale link is fetched again once. */
-  async fetchAudio(job, item, signal, onProgress) {
+  async fetchViaPlayer(job, item, signal, onProgress) {
+    // A playlist/profile keeps its page in the tab while its tracks go through the player.
+    if (job.pageUrl && !job.leased) {
+      await this.source.claim(job, signal);
+      job.leased = true;
+    }
     for (let attempt = 0; ; attempt++) {
       const index = job.context.type === 'single' ? null : item.index;
       const grab = await this.source.grab(job, job.tracks[item.index], { index, fresh: attempt > 0, signal });
@@ -425,7 +581,7 @@ export class Engine {
         job.tracks[item.index] = { ...job.tracks[item.index], ...grab.track };
         Object.assign(item, itemLabels(job.tracks[item.index]));
       }
-      const quality = qualityLabel(grab);
+      const quality = `${qualityLabel(grab)} · через плеер`;
       try {
         return await this.downloads.run(async () => {
           if (grab.protocol === 'progressive') return { bytes: await fetchBytes(grab.url, { signal, onProgress }), quality };

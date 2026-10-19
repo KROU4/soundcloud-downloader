@@ -1,20 +1,9 @@
-// Track data and stream links taken from an open soundcloud.com tab. The extension
-// does not call SoundCloud's API: content/page-hook.js watches what the site's own
-// player loads and starts playback through the site's play buttons when needed.
+// Track data and stream links taken from an open soundcloud.com tab: the fallback
+// source. content/page-hook.js watches what the site's own player loads and starts
+// playback through the site's play buttons when a track is needed.
+import { DRM_REASON, cleanUrl, isEncrypted } from './sc-api.js';
 
 const PAGE_RESERVED = /^\/(you|search|charts|settings|stations|feed|upload|messages|notifications|pages)(\/|$)/;
-
-/** Removes tracking/query noise and normalizes mobile links. */
-export function cleanUrl(input) {
-  const u = new URL(String(input).trim());
-  if (u.hostname === 'm.soundcloud.com' || u.hostname === 'www.soundcloud.com') u.hostname = 'soundcloud.com';
-  if (u.hostname === 'soundcloud.com') {
-    u.search = '';
-    u.hash = '';
-    u.pathname = u.pathname.replace(/\/+$/, '');
-  }
-  return u.href;
-}
 
 export function isSoundCloudPage(url) {
   try {
@@ -34,23 +23,7 @@ const samePath = (a, b) => {
   }
 };
 
-const isEncrypted = (t) => /encrypted/.test(t.format?.protocol || '');
-
-/** Short list of streams SoundCloud offered for a track, e.g. "aac_160k (DRM), mp3 (превью 30 с)". */
-export function describeStreams(track) {
-  const tcs = (track.media?.transcodings || []).filter((t) => !/^abr/.test(t.preset || ''));
-  if (!tcs.length) return 'нет';
-  return [
-    ...new Set(
-      tcs.map((t) => {
-        const notes = [isEncrypted(t) && 'DRM', t.snipped && 'превью 30 с'].filter(Boolean);
-        return `${t.preset}${notes.length ? ` (${notes.join(', ')})` : ''}`;
-      }),
-    ),
-  ].join(', ');
-}
-
-const DRM = 'Полная версия отдаётся только в зашифрованном виде (DRM): сайт может её проиграть, но сохранить файл нельзя';
+const DRM = DRM_REASON;
 const PREVIEW = 'Плеер получил только 30-секундное превью: полная версия доступна подписчикам Go+ (или войдите на soundcloud.com)';
 
 /** Reason a track cannot be saved in full, judged from the data the site already has; null if it looks fine. */
